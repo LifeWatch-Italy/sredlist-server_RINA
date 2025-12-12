@@ -1,5 +1,190 @@
 
+#################################
+### NEW APIs FOR RINA REBUILT ###
+#################################
 
+
+#* Prepare points for DD prioritizer
+#* @post species/<scientific_name>/DDprio_points
+#* @param scientific_name:string Scientific Name
+#* @serializer unboxedJSON
+#* @tag sRedList
+function(scientific_name, username) {
+  
+  
+  Prom<-future({
+    sf::sf_use_s2(FALSE)
+    
+    # Download and remove records with no spatial coordinates
+    scientific_name <- sRL_decode(scientific_name)
+    GBIF <- rgbif::occ_search(scientificName = scientific_name, hasCoordinate = T, limit=1000)$data 
+    
+    # Prepare GBIF data
+    if(is.null(nrow(GBIF))==F){
+      GBIF <- GBIF %>% filter(!is.na(decimalLongitude)) %>% filter(!is.na(decimalLatitude))
+      
+      # Year column
+      if(! "year" %in% names(GBIF)){GBIF$year<-NA}
+      GBIF$New_data<- GBIF$year > as.numeric(speciesRL$year_published[speciesRL$scientific_name==scientific_name])
+
+      # Popup text
+      GBIF$PopText<- paste0("<b>", ifelse(is.na(GBIF$New_data), "No observation date", revalue(as.character(GBIF$New_data), c("TRUE"="New observation since last assessment", "FALSE"="Observation made before last assessment"))),"</b>", "<br>", "<br>",
+                            "<b>","Observation ID: ","</b>", paste0("<a href='", "https://gbif.org/occurrence/", GBIF$gbifID, "' target='_blank'>", GBIF$gbifID, "</a>"), "<br>",
+                            "<b>","Year: ","</b>", GBIF$year, "<br>",
+                            "<b>","Uncertainty (km): ","</b>", as.numeric(as.character(GBIF$coordinateUncertaintyInMeters))/1000, "<br>")
+      
+      # Return
+      GBIF <- subset(GBIF, select=c("decimalLongitude", "decimalLatitude", "New_data", "PopText"))
+    }
+    
+    
+    return(list(Data_DD=GBIF))
+    
+  }, gc=T, seed=T)
+  
+  return(Prom)
+  
+}
+
+
+
+### Map API ----
+#* Global Biodiversity Information Facility step 3
+#* @get species/<scientific_name>/gbif3RINA
+#* @param scientific_name:string Scientific Name
+#* @param Gbif_Start:string Gbif_Start
+#* @param Gbif_Param:[int] Gbif_Param
+#* @param Gbif_Buffer:int Gbif_Buffer
+#* @param Gbif_Altitude:[int] Gbif_Altitude
+#* @param Gbif_Crop:string Gbif_Crop
+#* @serializer unboxedJSON
+#* @tag sRedList
+function(scientific_name, username, Gbif_Start="", Gbif_Param=list(), Gbif_Buffer=-1, Gbif_Altitude=list(), Gbif_Crop="", Gbif_RLDistBin="") {
+  
+  # Parameter error
+  if(Gbif_Start=="alpha" & Gbif_Param[1] <= 0){neg_alpha()}
+  if(Gbif_Start=="kernel" & Gbif_Param[2] <= 0){neg_kernel()}
+  if(Gbif_Start=="coastal" & (Gbif_Buffer==0 | Gbif_Crop=="")){no_gbif_coastal()}
+  if(grepl("hydro", Gbif_Start) & (Gbif_Buffer>0 | Gbif_Crop!="" | Gbif_Altitude[1]!="0" | Gbif_Altitude[2]!="9000" | Gbif_RLDistBin=="true")){hydro_modified()}
+  
+  
+  # Check the Step 2 has been run since Step 1 was last updated  
+  scientific_name <- sRL_decode(scientific_name)
+  Storage_SP=sRL_StoreRead(scientific_name,  username, MANDAT=1)
+  if(! "dat_proj_saved" %in% names(Storage_SP)){run_Step2()}  
+  
+  Prom<-future({
+    sf::sf_use_s2(FALSE)
+    
+    # Transform parameters GBIF filtering
+    Gbif_Buffer<-replace(Gbif_Buffer, Gbif_Buffer<0, 0)
+    if(Gbif_Start==""){Gbif_Start<-"mcp"}
+    print(Gbif_Start)
+    print(Gbif_Buffer)
+    print(Gbif_Altitude)
+    print(Gbif_Crop)
+    Gbif_Param<-as.numeric(Gbif_Param) ; print(Gbif_Param)
+    Gbif_RLDistBin<-Gbif_RLDistBin=="true" ; print(Gbif_RLDistBin)
+    
+    #GBIF STEP 3: Map distribution from GBIF
+    sRL_loginfo("START - Maps the distribution", scientific_name)
+    
+    # Get back GBIF observations
+    dat_proj=Storage_SP$dat_proj_saved
+    if(nrow(dat_proj)==0){no_gbif_data()}
+    
+    # Save leaflet for RMD report
+    Storage_SP$Leaf_saved <- sRL_LeafletFlags(Storage_SP$flags)
+    
+    # Display some errors
+    if(nrow(dat_proj)<=2 & Gbif_Start %in% c("mcp", "kernel", "alpha")){too_few_occurrences()}
+    
+    # Create distribution
+    distSP_BeforeCrop <- sRL_MapDistributionGBIF(dat_proj, scientific_name, username,
+                                                 First_step=Gbif_Start,
+                                                 AltMIN=as.numeric(Gbif_Altitude[1]), AltMAX=as.numeric(Gbif_Altitude[2]),
+                                                 Buffer_km=as.numeric(Gbif_Buffer),
+                                                 Gbif_Param=Gbif_Param) 
+    
+    # Merge with published range map
+    if(Gbif_RLDistBin==T){
+      sRL_loginfo("Merge with Red List map", scientific_name)
+      tryCatch({
+        # Load distribution
+        distRL0_path <- paste0(config$distribution_path, scientific_name, "/", sub(" ", "_", scientific_name), "_RL/", scientific_name, ".shp")
+        distRL <- sRL_PrepareDistrib(st_read(distRL0_path), scientific_name) # nolint
+        distRL <- subset(distRL, distRL$presence %in% c(1,2) & distRL$origin %in% c(1,2) & distRL$seasonal %in% c(1,2))
+        
+        # Merge with created range map
+        distSPM<-st_union(distSP_BeforeCrop, distRL) %>% dplyr::group_by(binomial) %>% dplyr::summarise(N= n()) 
+        distSP_BeforeCrop$geometry[1]<-distSPM$geometry[1]
+        
+      }, error=function(e){"Merging with published range map did not work"})
+    }
+    
+    # Crop by land/sea
+    distSP <- sRL_CropDistributionGBIF(distSP_BeforeCrop, Gbif_Crop)
+    
+    # Crop by country
+    Crop_Country<-Storage_SP$Output$Value[Storage_SP$Output$Parameter=="Crop_Country"]
+    if(is.na(Crop_Country) == F & Crop_Country != ""){distSP <- sRL_CropCountry(distSP, Crop_Country, scientific_name)}
+    
+    # Map countries (keeping max extent between points and polygons)
+    EXT_max <-  do.call(raster::bind, sapply(c(extent(distSP), extent(dat_proj)), FUN = function(x){as(x, 'SpatialPolygons')}))  %>% sp::bbox(.) %>% extent(.)
+    
+    CountrySP<-st_crop(distCountries, 1.15*EXT_max)
+    
+    # Store and calculate area
+    Storage_SP$CountrySP_saved<-CountrySP 
+    Storage_SP$gbif_number_saved=nrow(dat_proj)
+    
+    # Plot distribution
+    GPlot<-ggplot() + 
+      geom_sf(data=CountrySP, fill="gray70")+
+      geom_sf(data = distSP, fill="darkred") + 
+      geom_sf(data=dat_proj)+
+      labs(caption=ifelse("alphaTEMPO" %in% names(distSP), paste0("The true alpha tension parameter used is ", round(distSP$alphaTEMPO[1],2)), ""))+
+      sRLTheme_maps
+    
+    if(exists("distSPM")){GPlot<-GPlot+geom_sf(data=distRL, fill="gold", alpha=0.5)+labs(caption="Polygons from published map are shown in orange")}
+    
+    ggsave(paste0("resources/AOH_stored/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/Plots/gbifStep3.png"), GPlot, width=18, height=5.5) # nolint
+    plot3 <- base64enc::dataURI(file = paste0("resources/AOH_stored/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/Plots/gbifStep3.png"), mime = "image/png") # nolint
+    sRL_loginfo("END - Maps the distribution", scientific_name)
+    
+    # Keep distribution in memory
+    Storage_SP<-sRL_OutLog(Storage_SP, c("Mapping_Start", "Mapping_Crop", "Mapping_Buffer", "Mapping_Altitude", "Kernel_parameter", "Alpha_parameter", "Mapping_Merge"), c(Gbif_Start, Gbif_Crop, Gbif_Buffer, paste0(Gbif_Altitude, collapse=", "), ifelse(Gbif_Start=="kernel", Gbif_Param[2], NA), ifelse(Gbif_Start=="alpha", Gbif_Param[1], NA), Gbif_RLDistBin))
+    DistComm <- sRL_DistComment(Output=Storage_SP$Output, N_dat=nrow(dat_proj))
+    distSP$dist_comm <- DistComm
+    distSP_BeforeCrop$dist_comm <- DistComm
+    Storage_SP$distSP_saved=distSP[, names(distSP) != "alphaTEMPO"]
+    Storage_SP$distSP3_BeforeCrop <- distSP_BeforeCrop
+    sRL_StoreSave(scientific_name, username,  Storage_SP)
+    
+    # Save distribution in the platform
+    gbif_path <- sRL_saveMapDistribution(scientific_name, Storage_SP)
+    
+    
+    return(list(
+      Raw_points=as.data.frame(st_coordinates(st_transform(dat_proj, st_crs(4326)))),
+      Raw_polygons=geojsonio::topojson_json(input = st_transform(distSP, st_crs(4326)), crs = 4326),
+      plot_CreatedDistri = plot3,
+      gbif_data_number  = as.numeric(Storage_SP$gbif_number_saved),
+      gbif_path = gbif_path
+    ))
+    
+  }, gc=T, seed=T)
+  
+  return(Prom)
+}
+  
+
+
+
+
+####################################
+### OLD APIs BEFORE RINA REBUILT ###
+####################################
 
 # Step 1a: Charge distributions ----------------------------------------------------------------
 

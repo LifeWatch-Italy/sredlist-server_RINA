@@ -1,5 +1,5 @@
 # Set working directory (Victor path if we are on his laptop, LifeWatch path otherwise)
-setwd(dir=ifelse(file.exists("C:/Users/Victor"),"C:/Users/Victor/Documents/sRedList/Platform/InProgress/sredlist-server-develop", "/media/docker/sRedList/sredlist-server"))
+setwd(dir=ifelse(file.exists("C:/Users/TERRA"),"C:/Users/TERRA/Documents/sRedList/InProgress/sredlist-server_RINA", "/media/docker/sRedList/sredlist-server"))
 
 
 ### Set the asynchronous coding
@@ -29,6 +29,7 @@ library(TAF)
 library(rgbif) ; library(CoordinateCleaner) ; library(maps) ; library(countrycode); library(rnaturalearthdata); library(robis) # nolint
 library(plotly) ; library(mapview) ; library(leaflet) ; library(leaflet.extras) ; library(htmltools) ; library(leafem) ; library(leaflet.esri)
 library(adehabitatHR) ; library(smoothr) ; library(spatialEco) ; library(alphahull)
+library(geojsonio)
 
 ### AOH analyses
 library(exactextractr)
