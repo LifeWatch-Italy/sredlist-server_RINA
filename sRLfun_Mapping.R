@@ -552,12 +552,13 @@ sRL_cleanDataGBIF <- function(flags, year_GBIF, uncertainty_GBIF, Gbif_yearBin, 
 sRL_SubsetGbif<-function(flags, scientific_name){
   
   # Round coordinates (<1m change); needed to avoid having almost duplicate points in alpha function
-  flags$decimalLongitude<-round(flags$decimalLongitude,5) 
-  flags$decimalLatitude<-round(flags$decimalLatitude,5)
+  flags$decimalLongitude<-round(as.numeric(flags$decimalLongitude),5) 
+  flags$decimalLatitude<-round(as.numeric(flags$decimalLatitude),5)
   
   # Prepare GBIF data for mapping
   dat_cl <- flags[is.na(flags$Reason)==T,] # Keep only data that are not flagged
-
+  if(nrow(dat_cl)==0){return(data.frame())}
+  
   # Prepare spatial points
   dat_proj<-st_as_sf(dat_cl,coords = c("decimalLongitude", "decimalLatitude"), crs="+proj=longlat +datum=WGS84") %>%
     st_transform(., st_crs(CRSMOLL)) 

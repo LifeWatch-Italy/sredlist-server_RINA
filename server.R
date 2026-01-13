@@ -30,6 +30,7 @@ library(rgbif) ; library(CoordinateCleaner) ; library(maps) ; library(countrycod
 library(plotly) ; library(mapview) ; library(leaflet) ; library(leaflet.extras) ; library(htmltools) ; library(leafem) ; library(leaflet.esri)
 library(adehabitatHR) ; library(smoothr) ; library(spatialEco) ; library(alphahull)
 library(geojsonio)
+library(data.table)
 
 ### AOH analyses
 library(exactextractr)
