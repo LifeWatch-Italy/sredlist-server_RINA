@@ -59,7 +59,8 @@ function(scientific_name, username, points_json) {
     sf::sf_use_s2(FALSE)
     
     sRL_loginfo("START - Save manual edit records", scientific_name)
-
+    scientific_name <- sRL_decode(scientific_name)
+    
     ### Transform json to dataframe
     points_df <- data.table::rbindlist(points_json, fill=T)
     
