@@ -59,40 +59,45 @@ function(scientific_name, username) {
 ### Save filtered points from 'save map'
 #* @post species/<scientific_name>/gbif_save_step2
 #* @param scientific_name:string Scientific Name
-#* @param points_json:file A json file
+#* @param username:string Username
+#* @param points_json:list List of point objects (from JSON)
 #* @serializer unboxedJSON
 #* @tag sRedList
 function(scientific_name, username, points_json) {
-  
-  Prom<-future({
+  Prom <- future::future({
     sf::sf_use_s2(FALSE)
-    
     sRL_loginfo("START - Save manual edit records", scientific_name)
     scientific_name <- sRL_decode(scientific_name)
-    
-    ### Transform json to dataframe
-    points_df <- data.table::rbindlist(points_json, fill=T)
-    
-    ### Prepare points
-    points_df$species[is.na(points_df$species)] <- scientific_name
-    
-    ### Save flags and record usage
-    Storage_SP=sRL_StoreRead(scientific_name,  username, MANDAT=1)
-    
-    Storage_SP$flags <- points_df %>% as.data.frame(.) %>% .[, names(.) != "geometry"]
-    Storage_SP$dat_proj_saved <- sRL_SubsetGbif(Storage_SP$flags, scientific_name) # I use Storage_SPNEW$flags to make sure we are not using a df with geometries
+
+    # points_df <- as.data.frame(points_json)
+    points_df <- if (is.data.frame(points_json)) {
+      points_json
+    } else {
+      as.data.frame(points_json)
+    }
+
+    if (!"species" %in% colnames(points_df)) {
+      points_df$species <- scientific_name
+    } else {
+      points_df$species[is.na(points_df$species)] <- scientific_name
+    }
+
+    Storage_SP <- sRL_StoreRead(scientific_name, username, MANDAT = 1)
+
+    Storage_SP$flags <- points_df[, setdiff(names(points_df), "geometry"), drop = FALSE]
+    Storage_SP$dat_proj_saved <- sRL_SubsetGbif(Storage_SP$flags, scientific_name)
     
     # Record usage
-    Storage_SP$Output$Value[Storage_SP$Output$Parameter=="Gbif_EditPts"]<-"yes"
-    Storage_SP$Output$Count[Storage_SP$Output$Parameter=="Gbif_EditPts"]<-Storage_SP$Output$Count[Storage_SP$Output$Parameter=="Gbif_EditPts"]+1
-    
+    idx <- which(Storage_SP$Output$Parameter == "Gbif_EditPts")
+    if (length(idx) > 0) {
+      Storage_SP$Output$Value[idx] <- "yes"
+      Storage_SP$Output$Count[idx] <- Storage_SP$Output$Count[idx] + 1
+    }
     # Save Storage file
-    sRL_StoreSave(scientific_name, username,  Storage_SP)
+    sRL_StoreSave(scientific_name, username, Storage_SP)
 
     sRL_loginfo("END - Save manual edit records", scientific_name)
-    
   }, gc=T, seed=T)
-  
   return(Prom)
 }
     
