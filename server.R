@@ -93,6 +93,8 @@ convert_empty <- function(string) {
 # Charge species information from RL
 speciesRL <- readRDS("Species/species-all-page.rds") ; speciesRL$taxonid <- speciesRL$sis_taxon_id
 speciesDDapp <- readRDS("resources/resources_Shiny_DD/DD_prepared_for_ShinyREALMS.rds")
+speciesDDapp$Last_assessment <- speciesRL$year_published[match(speciesDDapp$taxonid, speciesRL$taxonid)]
+speciesDDapp <- subset(speciesDDapp, taxonid %in% speciesRL$taxonid[speciesRL$category=="DD"])
 
 # Load Map countries
 coo_raw<-read_sf("Species/Map countries/Red_List_countries_msSimplif_coo_0.001.shp") ; names(coo_raw)<-c("SIS_name0", "SIS_name1", "lookup", "lookup_SIS0", "geometry") ; coo_raw$lookup_SIS0[coo_raw$SIS_name0=="Namibia"]<-"NA" # Used to map COO; Namibia should be "NA" and not NA

@@ -37,8 +37,17 @@ function(scientific_name, username) {
       GBIF <- subset(GBIF, select=c("decimalLongitude", "decimalLatitude", "New_data", "PopText"))
     }
     
+    LIST <- list(Data_DD=GBIF)
     
-    return(list(Data_DD=GBIF))
+    ### Prepare distribution polygon
+    tryCatch({
+      distSP <- data.frame()
+      distSP <- st_read(paste0(config$distribution_path, SP, "/", gsub(" ", "_", SP), "_RL/", SP, ".shp")) %>% st_transform(., "+init=epsg:4326")
+    }, error=function(e){cat(paste0("No distribution for ", SP, ". \n"))})
+    LIST$Polygon <- distSP
+    
+    ### Return
+    return(LIST)
     
   }, gc=T, seed=T)
   
