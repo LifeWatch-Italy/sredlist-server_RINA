@@ -3,57 +3,210 @@
 ### NEW APIs FOR RINA REBUILT ###
 #################################
 
+library(plumber)
+library(DBI)
+library(RSQLite)
 
-#* Prepare points for DD prioritizer
-#* @post species/<scientific_name>/DDprio_points
+#* Prepare points for DD prioritizer including Forest loss tiles
+#* @post /species/<scientific_name>/DDprio_points
 #* @param scientific_name:string Scientific Name
 #* @serializer unboxedJSON
 #* @tag sRedList
-function(scientific_name, username) {
-  
-  
-  Prom<-future({
+function(scientific_name, username = NULL) {
+
+  future::future({
+
     sf::sf_use_s2(FALSE)
-    
-    # Download and remove records with no spatial coordinates
     scientific_name <- sRL_decode(scientific_name)
-    GBIF <- rgbif::occ_search(scientificName = scientific_name, hasCoordinate = T, limit=1000)$data 
-    
-    # Prepare GBIF data
-    if(is.null(nrow(GBIF))==F){
-      GBIF <- GBIF %>% filter(!is.na(decimalLongitude)) %>% filter(!is.na(decimalLatitude))
-      
-      # Year column
+
+    ### -------------------------
+    ### GBIF DATA
+    ### -------------------------
+    GBIF <- tryCatch({
+      rgbif::occ_search(
+        scientificName = scientific_name,
+        hasCoordinate = TRUE,
+        limit = 1000
+      )$data
+    }, error = function(e) NULL)
+
+    if (!is.null(GBIF) && nrow(GBIF) > 0) {
+      GBIF <- GBIF |>
+        dplyr::filter(!is.na(decimalLongitude),
+                      !is.na(decimalLatitude))
       if(! "year" %in% names(GBIF)){GBIF$year<-NA}
       GBIF$New_data<- GBIF$year > as.numeric(speciesRL$year_published[speciesRL$scientific_name==scientific_name])
+      GBIF$PopText <- paste0("<b>Observation ID: </b>",
+                             "<a href='https://gbif.org/occurrence/", GBIF$gbifID, "' target='_blank'>", GBIF$gbifID, "</a><br>",
+                             "<b>Year: </b>", GBIF$year)
+      GBIF <- GBIF[, c("decimalLongitude","decimalLatitude", "New_data","PopText")]
+    } else GBIF <- NULL
 
-      # Popup text
-      GBIF$PopText<- paste0("<b>", ifelse(is.na(GBIF$New_data), "No observation date", revalue(as.character(GBIF$New_data), c("TRUE"="New observation since last assessment", "FALSE"="Observation made before last assessment"))),"</b>", "<br>", "<br>",
-                            "<b>","Observation ID: ","</b>", paste0("<a href='", "https://gbif.org/occurrence/", GBIF$gbifID, "' target='_blank'>", GBIF$gbifID, "</a>"), "<br>",
-                            "<b>","Year: ","</b>", GBIF$year, "<br>",
-                            "<b>","Uncertainty (km): ","</b>", as.numeric(as.character(GBIF$coordinateUncertaintyInMeters))/1000, "<br>")
-      
-      # Return
-      GBIF <- subset(GBIF, select=c("decimalLongitude", "decimalLatitude", "New_data", "PopText"))
+    ### -------------------------
+    ### DISTRIBUTION POLYGON
+    ### -------------------------
+    shp_path <- file.path(config$distribution_path,
+                          scientific_name,
+                          paste0(gsub(" ", "_", scientific_name), "_RL"),
+                          paste0(scientific_name, ".shp"))
+    if (file.exists(shp_path)) {
+      distSP <- sf::st_read(shp_path, quiet = TRUE) |> sf::st_transform(4326)
+      polygon_geojson <- geojsonsf::sf_geojson(distSP) |> jsonlite::fromJSON()
+    } else polygon_geojson <- NULL
+
+    ### -------------------------
+    ### FOREST LOSS (MBTiles già pregenerate)
+    ### -------------------------
+    tiles_root <- "resources/resources_Shiny_DD/1.GFC_tiles"
+    sp_name <- gsub(" ", "_", scientific_name)
+    mbtiles_file <- file.path(tiles_root, paste0(sp_name,".mbtiles"))
+
+    if(file.exists(mbtiles_file)){
+      con <- DBI::dbConnect(RSQLite::SQLite(), mbtiles_file)
+      on.exit(DBI::dbDisconnect(con), add=TRUE)
+
+      # Bounds dal raster originale (in EPSG:4326)
+      r_path <- file.path("resources/resources_Shiny_DD/1.GFC_final",
+                          paste0(sp_name,"_RANGEsmall.tif"))
+      if(file.exists(r_path)){
+        r <- terra::rast(r_path)
+        if(terra::crs(r) != "EPSG:4326"){
+          r <- terra::project(r, "EPSG:4326")
+        }
+        e <- terra::ext(r)
+        bounds <- list(
+          c(e$ymin, e$xmin),
+          c(e$ymax, e$xmax)
+        )
+      } else bounds <- NULL
+
+      forest_tiles <- list(
+        type = "tileLayer",
+        url = paste0(
+          "http://localhost:8000/api/sredlist/tiles/",
+          sp_name,
+          "/{z}/{x}/{y}.png"
+        ),
+        bounds = bounds,
+        minZoom = 5,
+        maxZoom = 18
+      )
+    } else {
+      forest_tiles <- NULL
     }
-    
-    LIST <- list(Data_DD=GBIF)
-    
-    ### Prepare distribution polygon
-    tryCatch({
-      distSP <- data.frame()
-      distSP <- st_read(paste0(config$distribution_path, SP, "/", gsub(" ", "_", SP), "_RL/", SP, ".shp")) %>% st_transform(., "+init=epsg:4326")
-    }, error=function(e){cat(paste0("No distribution for ", SP, ". \n"))})
-    LIST$Polygon <- distSP
-    
-    ### Return
-    return(LIST)
-    
-  }, gc=T, seed=T)
-  
-  return(Prom)
-  
+
+    ### -------------------------
+    ### RETURN JSON
+    ### -------------------------
+    list(
+      Data_DD = GBIF,
+      Polygon = polygon_geojson,
+      Forestloss = forest_tiles
+    )
+
+  }, seed = TRUE)
 }
+
+transparent_png <- function(){
+  as.raw(c(
+    137,80,78,71,13,10,26,10,
+    0,0,0,13,73,72,68,82,
+    0,0,1,0,0,0,1,0,
+    8,6,0,0,0,95,196,
+    137,0,0,0,12,73,68,
+    65,84,120,156,99,96,0,
+    0,0,0,2,0,1,226,33,
+    188,51,0,0,0,0,73,
+    69,78,68,174,66,96,130
+  ))
+}
+
+#* Provide MBTiles to Leaflet
+#* @get /tiles/<species>/<z>/<x>/<y>
+#* @serializer contentType list(type="image/png")
+function(species, z, x, y, res){
+  y <- sub("\\.png$", "", y)
+  z <- sub("\\s+", "", z)
+  x <- sub("\\s+", "", x)
+  y <- sub("\\s+", "", y)
+
+  z <- as.numeric(z)
+  x <- as.numeric(x)
+  y <- as.numeric(y)
+
+  if(any(is.na(c(z,x,y)))){
+    res$status <- 400
+    return(transparent_png())
+  }
+
+  mbtiles_file <- file.path("resources/resources_Shiny_DD/1.GFC_tiles",
+                            paste0(species,".mbtiles"))
+  if(!file.exists(mbtiles_file)){
+    res$status <- 404
+    return(transparent_png())
+  }
+
+  con <- dbConnect(SQLite(), mbtiles_file)
+  on.exit(dbDisconnect(con), add=TRUE)
+
+  # TMS -> XYZ Leaflet
+  tms_y <- (2^z - 1) - y
+
+  tile <- dbGetQuery(con,
+    "SELECT tile_data FROM tiles 
+     WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+    params=list(z, x, tms_y)
+  )
+
+  if(nrow(tile)==0){
+    res$status <- 204
+    return(transparent_png())
+  }
+
+  res$setHeader("Content-Type","image/png")
+  return(tile$tile_data[[1]])
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 ### Save filtered points from 'save map'
@@ -217,7 +370,6 @@ function(scientific_name, username, Gbif_Start="", Gbif_Param=list(), Gbif_Buffe
     
     # Save distribution in the platform
     gbif_path <- sRL_saveMapDistribution(scientific_name, Storage_SP)
-    
     
     return(list(
       Raw_points=as.data.frame(st_coordinates(st_transform(dat_proj, st_crs(4326)))),
@@ -578,6 +730,18 @@ Prom<-future({
   
   ### Clean-string from user
   scientific_name <- sRL_decode(scientific_name)
+
+  normalize_empty <- function(x){
+    if(is.null(x) || length(x) == 0) return("")
+    if(is.character(x) && tolower(x[1]) %in% c("null","undefined","na")) return("")
+    return(x)
+  }
+
+  Gbif_Synonym  <- normalize_empty(Gbif_Synonym)
+  Gbif_Country  <- normalize_empty(Gbif_Country)
+  Uploaded_Records <- normalize_empty(Uploaded_Records)
+
+
   print(scientific_name)
   print(Gbif_Source)
   if(Gbif_Country=="Keep all countries"){Gbif_Country<-""} ; print(Gbif_Country)
@@ -594,12 +758,14 @@ Prom<-future({
 
   ### GBIF procedure
   sRL_loginfo("START - Create data", scientific_name)
-  dat <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
-  
+  # dat <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
+  res <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
+  dat <- res$dat
+  Warning_Create <- res$Warning_Create
   
   ## If there are synonyms
   if(Gbif_Synonym[1] != ""){
-    
+
     # Remove synonyms already in the downloaded data (dat)
     if("genericName" %in% names(dat) & "specificEpithet" %in% names(dat)){Gbif_Synonym <- subset(Gbif_Synonym, ! Gbif_Synonym %in% levels(as.factor(paste(dat$genericName, dat$specificEpithet, sep=" "))))}
     print(Gbif_Synonym)
@@ -3618,6 +3784,5 @@ Prom<-future({
                               
 return(Prom) 
 }
-
 
 

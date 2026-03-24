@@ -51,3 +51,5 @@ Assessments/*
 
 # Log Shiny app
 resources/resources_Shiny_DD/Logs/*
+supervisord.log
+supervisord.pid
