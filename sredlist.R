@@ -55,9 +55,10 @@ function(scientific_name, username = NULL) {
     } else polygon_geojson <- NULL
 
     ### -------------------------
-    ### FOREST LOSS (MBTiles già pregenerate)
+    ### FOREST LOSS (MBTiles)
     ### -------------------------
-    tiles_root <- "resources/resources_Shiny_DD/1.GFC_tiles"
+    # tiles_root <- "resources/resources_Shiny_DD/1.GFC_tiles"
+    tiles_root <- file.path("resources", "resources_Shiny_DD", "1.GFC_tiles")
     sp_name <- gsub(" ", "_", scientific_name)
     mbtiles_file <- file.path(tiles_root, paste0(sp_name,".mbtiles"))
 
@@ -66,8 +67,10 @@ function(scientific_name, username = NULL) {
       on.exit(DBI::dbDisconnect(con), add=TRUE)
 
       # Bounds dal raster originale (in EPSG:4326)
-      r_path <- file.path("resources/resources_Shiny_DD/1.GFC_final",
-                          paste0(sp_name,"_RANGEsmall.tif"))
+      # r_path <- file.path("resources/resources_Shiny_DD/1.GFC_final",
+      #                     paste0(sp_name,"_RANGEsmall.tif"))
+      r_path <- file.path("resources", "resources_Shiny_DD", "1.GFC_final",
+                    paste0(sp_name, "_RANGEsmall.tif"))
       if(file.exists(r_path)){
         r <- terra::rast(r_path)
         if(terra::crs(r) != "EPSG:4326"){
@@ -594,7 +597,7 @@ function(scientific_name, username) {
     distSP <- Storage_SP$distSP_saved
     
     ### Download GBIF data
-    dat <- sRL_createDataGBIF(scientific_name, c(1,0,0), Storage_SP$Output$Value[Storage_SP$Output$Parameter=="Crop_Country"], "")
+    dat <- sRL_createDataGBIF(scientific_name, c(1,0,0), Storage_SP$Output$Value[Storage_SP$Output$Parameter=="Crop_Country"], "")$dat
     
     if(nrow(dat)==0){return(leaflet() %>% addControl(HTML("We did not find any GBIF record for this species"), position = "topleft", className="map-title"))}
     
@@ -667,24 +670,31 @@ function(scientific_name, username, presences = list(), seasons = list() , origi
     ### Colour distribution
     distSP <- sRL_ColourDistrib(distSP)
     
-    ### Expand countries if extent changed (for instance if we increase distribution manually)
-    if(length(st_covered_by(
-      st_as_sfc(st_bbox(distSP)),
-      st_transform(st_as_sfc(st_bbox(Storage_SP$CountrySP_saved)), st_crs(distSP))
-    )[[1]])==0){
-      sRL_loginfo("Extract countries again", scientific_name)
-      Storage_SP$CountrySP_saved<-sRL_PrepareCountries(1.2*extent(st_transform(distSP, CRSMOLL)))
-    }
-    
-    ### Plot
+    ### Empty plot (needed if no distribution left with these attributes)
     plot_dist<-ggplot() +
       geom_sf(data = Storage_SP$CountrySP_saved, fill="gray96", col="gray50") + # nolint
-      geom_sf(data = distSP, fill = distSP$cols) +
       theme_void() +
       ggtitle("")
+    if(nrow(distSP)==0){warning_dist = "The distribution is empty, you need to edit the attributes selection to go further"}
+    
+    ### Expand countries if extent changed (for instance if we increase distribution manually)
+    if(nrow(distSP)>0){
+      if(length(st_covered_by(
+        st_as_sfc(st_bbox(distSP)),
+        st_transform(st_as_sfc(st_bbox(Storage_SP$CountrySP_saved)), st_crs(distSP))
+      )[[1]])==0){
+        sRL_loginfo("Extract countries again", scientific_name)
+        Storage_SP$CountrySP_saved<-sRL_PrepareCountries(1.2*extent(st_transform(distSP, CRSMOLL)))
+      }
+      
+      ### Plot
+      plot_dist <- plot_dist +
+        geom_sf(data = distSP, fill = distSP$cols)
 
     ### Save the distribution in memory (after merging it)
-    Storage_SP$distSP_selected <- sRL_MergeDistri(distSP) %>% st_transform(., CRSMOLL)
+      distSP <- sRL_MergeDistri(distSP) %>% st_transform(., CRSMOLL)
+    }
+    Storage_SP$distSP_selected <- distSP
     Storage_SP<-sRL_OutLog(Storage_SP, c("Distribution_Presence", "Distribution_Seasonal", "Distribution_Origin"), c(paste0(presences, collapse=","), paste0(seasons, collapse=","), paste0(origins, collapse=",")))
     sRL_StoreSave(scientific_name, username,  Storage_SP)
 
@@ -695,7 +705,7 @@ function(scientific_name, username, presences = list(), seasons = list() , origi
     sRL_loginfo("END - Prepare attributes", scientific_name)
     
     # Return
-    return(list(plot_selected=plot_distENC))
+    return(list(plot_selected=plot_distENC, warning_dist=ifelse(nrow(distSP)==0, 1, 0)))
     
   }, gc=T, seed=T)
   
@@ -730,18 +740,6 @@ Prom<-future({
   
   ### Clean-string from user
   scientific_name <- sRL_decode(scientific_name)
-
-  normalize_empty <- function(x){
-    if(is.null(x) || length(x) == 0) return("")
-    if(is.character(x) && tolower(x[1]) %in% c("null","undefined","na")) return("")
-    return(x)
-  }
-
-  Gbif_Synonym  <- normalize_empty(Gbif_Synonym)
-  Gbif_Country  <- normalize_empty(Gbif_Country)
-  Uploaded_Records <- normalize_empty(Uploaded_Records)
-
-
   print(scientific_name)
   print(Gbif_Source)
   if(Gbif_Country=="Keep all countries"){Gbif_Country<-""} ; print(Gbif_Country)
@@ -753,19 +751,18 @@ Prom<-future({
   # Uploaded Records if we uploaded data (it's a list with 1 element being the title of the uploaded csv file); I edit the csv if separator not good
   if(Uploaded_Records != ""){
     Uploaded_Records<-sRL_FormatUploadedRecords(Uploaded_Records, scientific_name, Gbif_Synonym)
-    print(head(Uploaded_Records))
+    print(head(Uploaded_Records$Uploaded_Records))
   }
 
   ### GBIF procedure
   sRL_loginfo("START - Create data", scientific_name)
-  # dat <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
-  res <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
-  dat <- res$dat
-  Warning_Create <- res$Warning_Create
+  Created_Data <- sRL_createDataGBIF(scientific_name, Gbif_Source, Gbif_Country, Uploaded_Records)
+  dat <- Created_Data$dat
+  
   
   ## If there are synonyms
   if(Gbif_Synonym[1] != ""){
-
+    
     # Remove synonyms already in the downloaded data (dat)
     if("genericName" %in% names(dat) & "specificEpithet" %in% names(dat)){Gbif_Synonym <- subset(Gbif_Synonym, ! Gbif_Synonym %in% levels(as.factor(paste(dat$genericName, dat$specificEpithet, sep=" "))))}
     print(Gbif_Synonym)
@@ -773,7 +770,7 @@ Prom<-future({
     # Run again the data collection (in a tryCatch to avoid errors if the name does not exist)
     for(SY in 1:length(Gbif_Synonym)){
       tryCatch({
-        dat_syn<-sRL_createDataGBIF(Gbif_Synonym[SY], Gbif_Source, Gbif_Country, "") # Same Source options as it can be useful for GBIF, OBIS but also Red List (eg species name was changed)
+        dat_syn<-sRL_createDataGBIF(Gbif_Synonym[SY], Gbif_Source, Gbif_Country, "")$dat # Same Source options as it can be useful for GBIF, OBIS but also Red List (eg species name was changed)
         dat_syn$species<-scientific_name
         dat_syn$Source_type=paste0("Synonyms_", dat_syn$Source_type)
         dat_syn<-subset(dat_syn, ! paste0(dat_syn$decimalLongitude, dat_syn$decimalLatitude) %in% paste0(dat$decimalLongitude, dat$decimalLatitude)) # Remove the synonym observations that are already at location of the focal species (to avoid duplicated observations, see for instance Cheilosia hercyniae and C. means)
@@ -809,9 +806,8 @@ Prom<-future({
   LIMS<-c(xmin=min(dat$decimalLongitude), xmax=max(dat$decimalLongitude), ymin=min(dat$decimalLatitude), ymax=max(dat$decimalLatitude))
   LIMS<-c(xmin=max(-179.9, LIMS["xmin"] - 0.1*max(1,abs(LIMS["xmin"]-LIMS["xmax"]))),   xmax=min(179.9, LIMS["xmax"] + 0.1*max(1,abs(LIMS["xmin"]-LIMS["xmax"]))),
           ymin=max(-89.9, LIMS["ymin"] - 0.1*max(1,abs(LIMS["ymin"]-LIMS["ymax"]))),    ymax=min(89.9, LIMS["ymax"] + 0.1*max(1,abs(LIMS["ymin"]-LIMS["ymax"])))) ; print(LIMS)
-  CountrySP_WGS<-distCountries_WGS
-  tryCatch({CountrySP_WGS<-st_crop(CountrySP_WGS, LIMS)}, error=function(e){"Bug in cropping country"})
-  CountrySP_WGS$land<-"TRUE"
+  CountrySP_WGS<-distCountries_WGS %>% mutate(land="TRUE")
+  tryCatch({CountrySP_WGS<-st_crop(CountrySP_WGS, LIMS) ; CountrySP_WGS$land<-"TRUE"}, error=function(e){"Bug in cropping country"})
   sRL_loginfo("Country cropped", scientific_name)
   
   # Flag observations to remove
@@ -854,7 +850,10 @@ Prom<-future({
   sRL_StoreSave(scientific_name, username,  Storage_SP)
   sRL_loginfo("END - Save gbif output files", scientific_name)
   
-  return(list(plot_data=plot1))
+  return(list(
+    plot_data=plot1,
+    Warning_CreateGbif = Created_Data$Warning_Create
+    ))
   
 }, gc=T, seed=T)
   
@@ -1397,8 +1396,8 @@ function(scientific_name, username) { # nolint
     ### Plot EOO
     EOO_leaflet<-leaflet() %>%
       addTiles(group="OpenStreetMap") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+      addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+      addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
       addPolygons(data=distSP, color="#D69F32", fillOpacity=0.5, group="Distribution") %>% 
       addPolygons(data=EOO, color="#ef3b2c", fillOpacity=0, group="EOO") %>% 
       addLayersControl(baseGroups=c("OpenStreetMap", "Satellite", "Topography"), overlayGroups=c("Distribution", "EOO"), position="topleft") %>% 
@@ -1517,14 +1516,20 @@ function(scientific_name, username) {
     ifelse(scientific_name %in% GL_file$internal_taxon_name, 
            paste0("A generation length was found in ", GL_file$Source[GL_file$internal_taxon_name==scientific_name][1]), 
            "default")
-  ) %>% paste0(., "; value: ", as.character(GL_species))
+  ) 
+  ORIGINAL <- ifelse(
+    exists("GL_stored"),
+    paste0("Original value from last assessment: ", GL_species),
+    paste0("Original value by default: ", 1)
+  )
   
   # If range of GL, transform to mean value
   if(grepl("-", GL_species)){GL_species <- GL_species %>% strsplit(., "-") %>% unlist(.) %>% gsub(" ", "", .) %>% as.numeric(.) %>% mean(., na.rm=T)}
   
   return(list(
     GL_species = as.character(GL_species),
-    GL_src = SRC
+    GL_src = SRC,
+    GL_original = ORIGINAL
     ))
 }
 
@@ -1761,7 +1766,7 @@ Prom<-future({
           coord_fixed()+
           geom_tile(aes(fill = factor(value, levels=c("0", "1")))) +
           scale_fill_manual(values=c("#FBCB3C", "#25BC5A", NA), labels=c("Unsuitable", "Suitable", ""), name="", na.translate=F, drop=F) +
-          ggtitle("Area of Habitat in 2020") +
+          ggtitle(paste0("Area of Habitat in ", config$YearAOH2)) +
           sRLTheme_maps
       }
       
@@ -2043,8 +2048,8 @@ function(scientific_name, username) { # nolint
     ### Plot
     AOH_leaflet<-leaflet() %>%
      addTiles(group="OpenStreetMap") %>%
-     addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-     addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+     addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+     addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
      addPolygons(data=distPROJ, color="#D69F32", fillOpacity=0, group="Distribution") %>% 
      addMouseCoordinates()
     
@@ -2126,8 +2131,8 @@ function(scientific_name, username) { # nolint
     ### Plot AOO
     AOO_leaflet<-leaflet() %>%
       addTiles(group="OpenStreetMap") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+      addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+      addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
       addPolygons(data=aoo, group="AOO", opacity=0.7, color="#25BC5A", stroke=F) %>%
       addPolygons(data=distPROJ, color="#D69F32", fillOpacity=0, group="Distribution") %>% 
       addLayersControl(baseGroups=c("OpenStreetMap", "Satellite", "Topography"), overlayGroups=c("Distribution", "AOO"), position="topleft") %>% 
@@ -2190,6 +2195,7 @@ Prom<-future({
   distSP$binomial<-as.character(distSP$binomial)
   
   # Output directory + options
+  unlink(paste0(output_dir, "/Initial"), recursive = T) ; unlink(paste0(output_dir, "/Initial_optimistic"), recursive = T)
   dir.create(paste0(output_dir, "/Initial"));   dir.create(paste0(output_dir, "/Initial_optimistic"))
   terraOptions(tempdir=paste0(output_dir, "/Temporary"), memmax=config$RAMmax_GB)
   rasterOptions(tmpdir=paste0(output_dir, "/Temporary"), maxmemory=config$RAMmax_GB)
@@ -2398,8 +2404,8 @@ function(scientific_name, username) { # nolint
     ### Basic plot
     Trends_leaflet<-leaflet() %>%
       addTiles(group="OpenStreetMap") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+      addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+      addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
       addPolygons(data=distPROJ, color="#D69F32", fillOpacity=0, group="Distribution") %>% 
       addMouseCoordinates()
     
@@ -2625,11 +2631,18 @@ Prom<-future({
   Storage_SP$GL_saved<-GL_species
   print(RSproduct)
   
+  # Get AOO if calculated
+  if("AOHkm2_saved" %in% names(Storage_SP)){
+    AOO_path <- paste0("resources/AOH_stored/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), ifelse(Storage_SP$Uncertain=="Uncertain_no", "/Upper_AOO_from_AOH.tif", "/Upper_AOO_from_optimistic_AOH.tif"))
+    if(file.exists(AOO_path)==F){AOO_path <- NULL}
+    } else {AOO_path <- NULL}
+  
   # Run functions to calculate trends
-  if(RSproduct=="Human_density"){List_trendsRS<-sRL_CalcHumandensity(scientific_name, username, distSP, GL_species)}
+  if(RSproduct=="Human_density"){List_trendsRS<-sRL_CalcHumandensity(scientific_name, username, distSP, GL_species, AOO_path)}
   if(RSproduct=="Forest_cover"){List_trendsRS<-sRL_CalcForestchange(scientific_name, username, distSP, GL_species)}
-  if(RSproduct=="Human_modification"){List_trendsRS<-sRL_CalcModification(scientific_name, username, distSP)}
-  if(RSproduct=="Water_availability"){List_trendsRS<-sRL_CalcWater(scientific_name, username, distSP)}
+  if(RSproduct=="Human_modification"){List_trendsRS<-sRL_CalcModification(scientific_name, username, distSP, AOO_path)}
+  if(RSproduct=="Forest_Integrity"){List_trendsRS<-sRL_CalcForestIntegrity(scientific_name, username, distSP, AOO_path)}
+  if(RSproduct=="Water_availability"){List_trendsRS<-sRL_CalcWater(scientific_name, username, distSP, AOO_path)}
   
   # Save usage
   RS_stored<-Storage_SP$Output$Value[Storage_SP$Output$Parameter=="Usage_RS"]
@@ -2665,37 +2678,57 @@ function(scientific_name, username, RSproduct) { # nolint
     #Filter param
     scientific_name <- sRL_decode(scientific_name)
     Storage_SP=sRL_StoreRead(scientific_name,  username, MANDAT=1) ; print(names(Storage_SP))
-    RSPROJ_current<-raster(paste0("resources/AOH_stored/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/", RSproduct, "_Current.tif"))
-    RSPROJ_trends<-raster(paste0("resources/AOH_stored/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/", RSproduct, "_Change.tif"))
+    if(RSproduct=="Forest_Integrity"){
+      RSPROJ_current <- raster(paste0("resources/AOH_stored/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/Forest_integrity.tif"))
+    } else {
+      RSPROJ_current<-raster(paste0("resources/AOH_stored/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/", RSproduct, "_Current.tif"))
+      RSPROJ_trends<-raster(paste0("resources/AOH_stored/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "/", RSproduct, "_Change.tif"))
+    }
     distSP<-Storage_SP$distSP_selected
     distPROJ<-st_transform(distSP, st_crs(4326))
 
     ### Plot
     RS_leaflet<-leaflet() %>%
       addTiles(group="OpenStreetMap") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-      addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+      addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+      addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
       addPolygons(data=distPROJ, color="#D69F32", fillOpacity=0, group="Distribution") %>% 
       addMouseCoordinates()
 
     
     ### Color palette
-    LIM<-max(abs(summary(RSPROJ_trends)[1]), abs(summary(RSPROJ_trends)[5]))
     
-    if(RSproduct %in% c("Forest_cover", "Water_availability")){
-      ColPal1<-colorNumeric("viridis", c(0,100), na.color = NA)
-      ColPal2<-colorNumeric(c("#8c510a", "azure2", "#018571"), domain=c(-LIM, 0, LIM), na.color = NA)
-    } else {
-      ColPal1<-colorNumeric("viridis", c(summary(RSPROJ_current)[1],summary(RSPROJ_current)[5]), na.color = NA)
-      ColPal2<-colorNumeric(c("#018571", "azure2", "#8c510a"), domain=c(-LIM, 0, LIM), na.color = NA)
-    }
+    if(RSproduct=="Forest_Integrity"){
+      ColPal1<-colorNumeric("viridis", c(0,10), na.color = NA)
+      flii_cat <- classify(rast(RSPROJ_current), rcl=c(0,6,9.6,10), include.lowest=TRUE)
+      COL_rast <- levels(droplevels(flii_cat))[[1]]$flii_earth %>% revalue(., c("[0 - 6]"="#8c510a", "(6 - 9.6]"="lightgreen", "(9.6 - 10]"="darkgreen"), warn_missing=F)
 
-    RS_leaflet<-RS_leaflet %>%
+      RS_leaflet<-RS_leaflet %>%
+        addRasterImage(RSPROJ_current, method="ngb", group="Continuous", opacity=1, colors=ColPal1) %>%
+        addRasterImage(flii_cat, method="ngb", group="Categorised", opacity=1, colors=COL_rast) %>%
+        addLayersControl(baseGroups=c("OpenStreetMap", "Satellite", "Topography"), overlayGroups=c("Distribution", "Continuous", "Categorised"), position="topleft", options=layersControlOptions(collapsed = FALSE)) %>%
+        hideGroup("Change") # Change is hidden by default
+      
+    } else {
+      
+      LIM<-max(abs(summary(RSPROJ_trends)[1]), abs(summary(RSPROJ_trends)[5]))
+      
+      if(RSproduct %in% c("Forest_cover", "Water_availability")){
+        ColPal1<-colorNumeric("viridis", c(0,100), na.color = NA)
+        ColPal2<-colorNumeric(c("#8c510a", "azure2", "#018571"), domain=c(-LIM, 0, LIM), na.color = NA)
+      } else {
+        ColPal1<-colorNumeric("viridis", c(summary(RSPROJ_current)[1],summary(RSPROJ_current)[5]), na.color = NA)
+        ColPal2<-colorNumeric(c("#018571", "azure2", "#8c510a"), domain=c(-LIM, 0, LIM), na.color = NA)
+      }
+      
+      RS_leaflet<-RS_leaflet %>%
         addRasterImage(RSPROJ_current, method="ngb", group="Current", opacity=1, colors=ColPal1) %>%
         addRasterImage(RSPROJ_trends, method="ngb", group="Change", opacity=1, colors=ColPal2) %>%
         addLayersControl(baseGroups=c("OpenStreetMap", "Satellite", "Topography"), overlayGroups=c("Distribution", "Current", "Change"), position="topleft", options=layersControlOptions(collapsed = FALSE)) %>%
         hideGroup("Change") # Change is hidden by default
-
+      
+    }
+    
     ### Store usage
     Storage_SP<-sRL_OutLog(Storage_SP, "RS_leaflet", "Used")
     Storage_SP[which(names(Storage_SP)==paste0("RS_leaflet_", RSproduct))]<-NULL # Remove the previous leaflet of the same RSproduct
@@ -2737,6 +2770,7 @@ function(scientific_name, username){
   if("SpeciesAssessment" %in% names(Storage_SP)){
     # If species already in the Red List, we use its information
     Official <- as.data.frame(Storage_SP$SpeciesAssessment$taxon)
+    Official$authority <- speciesRL$authority[speciesRL$scientific_name==scientific_name][1]
     sRL_loginfo("Using RL from same species", scientific_name)
     } else {
     # Otherwise we look if there is another species of the same genus (except for authority)
@@ -3784,5 +3818,6 @@ Prom<-future({
                               
 return(Prom) 
 }
+
 
 
