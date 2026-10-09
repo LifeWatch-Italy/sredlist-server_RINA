@@ -441,6 +441,31 @@ function(req, res) {
   )
 }
 
+# Info box of the COO map (realms + list of countries of occurrence): port of
+# the list-icon modal built by sRL_cooInfoBox_* in the legacy COO leaflet
+coo_info_box <- function(COO, Storage_SP) {
+  tryCatch({
+    realms <- Storage_SP$Realms_saved
+    realms <- if (is.null(realms) || is.na(realms) || realms == "") character(0) else unlist(strsplit(realms, "[|]"))
+    # sRL_cooInfoBox_format reads the global coo_raw (only lookup_SIS0 -> SIS_name0),
+    # which rina_api does not load: provide it from the stored COO table instead
+    fmt <- sRL_cooInfoBox_format
+    environment(fmt) <- list2env(
+      list(coo_raw = sf::st_drop_geometry(COO)[, c("SIS_name0", "lookup_SIS0")]),
+      parent = globalenv()
+    )
+    countries_html <- fmt(sRL_cooInfoBox_prepare(COO, Storage_SP), Storage_SP)
+    list(
+      realms = I(realms),
+      countries_html = jsonlite::unbox(countries_html),
+      has_italics = jsonlite::unbox(grepl("</i>", countries_html))
+    )
+  }, error = function(e) {
+    log_warn("Countries info box failed: {e$message}")
+    NULL
+  })
+}
+
 ##############################
 ### COUNTRIES - LOAD DATA ###
 ##############################
@@ -514,12 +539,15 @@ function(req, res, sci_name, username = req$argsQuery$username) {
     area_km2 <- sum(as.numeric(sf::st_area(dist_poly)), na.rm = TRUE) / 1e6
   }
 
+  info <- coo_info_box(COO, Storage_SP)
+
   list(
     species = sci_name,
     countries_geojson = countries_geojson,
     distribution_polygon = dist_geojson,
     area_km2 = jsonlite::unbox(area_km2),
-    table = normalize_json_table(COO_table)
+    table = normalize_json_table(COO_table),
+    info = info
   )
 }
 
@@ -622,7 +650,8 @@ function(req, res, sci_name, username) {
 
   list(
     message = "Changes applied and saved",
-    data = normalize_json_table(sf::st_drop_geometry(COO))
+    data = normalize_json_table(sf::st_drop_geometry(COO)),
+    info = coo_info_box(COO, Storage_SP)
   )
 }
 
