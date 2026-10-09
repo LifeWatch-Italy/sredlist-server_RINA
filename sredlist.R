@@ -30,17 +30,126 @@ function(scientific_name, username = NULL) {
       )$data
     }, error = function(e) NULL)
 
+
+
+
+
+
+
+
+
+
+
+    # if (!is.null(GBIF) && nrow(GBIF) > 0) {
+    #   GBIF <- GBIF |>
+    #     dplyr::filter(!is.na(decimalLongitude),
+    #                   !is.na(decimalLatitude))
+    #   if(! "year" %in% names(GBIF)){GBIF$year<-NA}
+    #   GBIF$New_data<- GBIF$year > as.numeric(speciesRL$year_published[speciesRL$scientific_name==scientific_name])
+    #   GBIF$PopText <- paste0("<b>Observation ID: </b>",
+    #                          "<a href='https://gbif.org/occurrence/", GBIF$gbifID, "' target='_blank'>", GBIF$gbifID, "</a><br>",
+    #                          "<b>Year: </b>", GBIF$year)
+    #   GBIF <- GBIF[, c("decimalLongitude","decimalLatitude", "New_data","PopText")]
+    # } else GBIF <- NULL
     if (!is.null(GBIF) && nrow(GBIF) > 0) {
+
+      # ---------------------------------------------------------------------------
+      # Pulizia coordinate
       GBIF <- GBIF |>
-        dplyr::filter(!is.na(decimalLongitude),
-                      !is.na(decimalLatitude))
-      if(! "year" %in% names(GBIF)){GBIF$year<-NA}
-      GBIF$New_data<- GBIF$year > as.numeric(speciesRL$year_published[speciesRL$scientific_name==scientific_name])
-      GBIF$PopText <- paste0("<b>Observation ID: </b>",
-                             "<a href='https://gbif.org/occurrence/", GBIF$gbifID, "' target='_blank'>", GBIF$gbifID, "</a><br>",
-                             "<b>Year: </b>", GBIF$year)
-      GBIF <- GBIF[, c("decimalLongitude","decimalLatitude", "New_data","PopText")]
-    } else GBIF <- NULL
+        dplyr::filter(
+          !is.na(decimalLongitude),
+          !is.na(decimalLatitude)
+        )
+
+      if (nrow(GBIF) == 0) {
+        GBIF <- NULL
+
+      } else {
+
+        # -------------------------------------------------------------------------
+        # Garantisci colonna year numerica
+        if (!"year" %in% names(GBIF)) {
+          GBIF$year <- NA_real_
+        } else {
+          GBIF$year <- suppressWarnings(as.numeric(GBIF$year))
+        }
+
+        # -------------------------------------------------------------------------
+        # Estrai anno di riferimento (safe)
+        year_ref <- speciesRL |>
+          dplyr::filter(.data$scientific_name == scientific_name) |>
+          dplyr::pull(.data$year_published)
+
+        year_ref <- suppressWarnings(as.numeric(year_ref))
+
+        if (length(year_ref) == 0 || all(is.na(year_ref))) {
+          year_ref <- NA_real_
+        } else {
+          year_ref <- year_ref[1]  # evita mismatch
+        }
+
+        # -------------------------------------------------------------------------
+        # Calcolo New_data (vector-safe)
+        if (is.na(year_ref)) {
+          GBIF$New_data <- NA
+        } else {
+          GBIF$New_data <- GBIF$year > year_ref
+        }
+
+        # -------------------------------------------------------------------------
+        # Garantisci gbifID
+        if (!"gbifID" %in% names(GBIF)) {
+          GBIF$gbifID <- NA
+        }
+
+        # -------------------------------------------------------------------------
+        # PopText robusto
+        GBIF$PopText <- paste0(
+          "<b>Observation ID: </b>",
+          ifelse(
+            is.na(GBIF$gbifID),
+            "NA",
+            paste0(
+              "<a href='https://gbif.org/occurrence/",
+              GBIF$gbifID,
+              "' target='_blank'>",
+              GBIF$gbifID,
+              "</a>"
+            )
+          ),
+          "<br><b>Year: </b>",
+          ifelse(is.na(GBIF$year), "NA", GBIF$year)
+        )
+
+        # -------------------------------------------------------------------------
+        # Selezione finale colonne (safe)
+        cols_needed <- c("decimalLongitude", "decimalLatitude", "New_data", "PopText")
+        cols_existing <- intersect(cols_needed, names(GBIF))
+
+        GBIF <- GBIF[, cols_existing, drop = FALSE]
+
+        # fallback sicurezza
+        if (nrow(GBIF) == 0) {
+          GBIF <- NULL
+        }
+      }
+
+    } else {
+      GBIF <- NULL
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     ### -------------------------
     ### DISTRIBUTION POLYGON
@@ -217,9 +326,10 @@ function(species, z, x, y, res){
 #* @param scientific_name:string Scientific Name
 #* @param username:string Username
 #* @param points_json:list List of point objects (from JSON)
+#* @param nongeo_json:list Optional non-georeferenced records table (Raw + Summary)
 #* @serializer unboxedJSON
 #* @tag sRedList
-function(scientific_name, username, points_json) {
+function(scientific_name, username, points_json, nongeo_json = NULL) {
   Prom <- future::future({
     sf::sf_use_s2(FALSE)
     sRL_loginfo("START - Save manual edit records", scientific_name)
@@ -242,7 +352,20 @@ function(scientific_name, username, points_json) {
 
     Storage_SP$flags <- points_df[, setdiff(names(points_df), "geometry"), drop = FALSE]
     Storage_SP$dat_proj_saved <- sRL_SubsetGbif(Storage_SP$flags, scientific_name)
-    
+
+    # Persist the non-georeferenced records table if provided (port of Shiny_EditPts.R:222)
+    tryCatch({
+      if (!is.null(nongeo_json)) {
+        raw <- nongeo_json$Raw
+        if (!is.null(raw) && length(raw) > 0) {
+          Storage_SP$TableNonGeo <- list(
+            Raw     = as.data.frame(raw),
+            Summary = if (!is.null(nongeo_json$Summary)) as.data.frame(nongeo_json$Summary) else NULL
+          )
+        }
+      }
+    }, error = function(e) sRL_loginfo(paste("Could not save TableNonGeo:", e$message), scientific_name))
+
     # Record usage
     idx <- which(Storage_SP$Output$Parameter == "Gbif_EditPts")
     if (length(idx) > 0) {
@@ -253,7 +376,7 @@ function(scientific_name, username, points_json) {
     sRL_StoreSave(scientific_name, username, Storage_SP)
 
     sRL_loginfo("END - Save manual edit records", scientific_name)
-  }, gc=T, seed=T)
+  }, seed=T)
   return(Prom)
 }
     
@@ -382,7 +505,7 @@ function(scientific_name, username, Gbif_Start="", Gbif_Param=list(), Gbif_Buffe
       gbif_path = gbif_path
     ))
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -572,7 +695,7 @@ function(scientific_name, username) {
   # Return
   return(list(plot_edit=plot_distENC))
 
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -635,7 +758,7 @@ function(scientific_name, username) {
     
     return(Leaflet_DistriComparison)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
   
@@ -707,7 +830,7 @@ function(scientific_name, username, presences = list(), seasons = list() , origi
     # Return
     return(list(plot_selected=plot_distENC, warning_dist=ifelse(nrow(distSP)==0, 1, 0)))
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -855,7 +978,7 @@ Prom<-future({
     Warning_CreateGbif = Created_Data$Warning_Create
     ))
   
-}, gc=T, seed=T)
+}, seed=T)
   
 return(Prom)
   
@@ -915,7 +1038,7 @@ Prom<-future({
     Leaflet_Filter
   )
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
   
@@ -971,7 +1094,7 @@ function(scientific_name, username) {
       plot_extract_elevation = plot
     ))
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }  
@@ -1102,7 +1225,7 @@ Prom<-future({
     gbif_path = gbif_path
   ))
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -1201,7 +1324,7 @@ function(scientific_name, username) {
       plot_showcase = plot3showcase
     ))
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   gc()
   return(Prom)
@@ -1215,6 +1338,20 @@ function(scientific_name, username) {
 
 ## System preferences -------
 #* Extract system preferences from previous assessments or options
+#* Check whether a user's session files exist (lightweight, no computation)
+#* @get species/<scientific_name>/session
+#* @param scientific_name:string Scientific Name
+#* @param username:string Username
+#* @serializer unboxedJSON
+#* @tag sRedList
+function(scientific_name, username){
+  FILE <- paste0("resources/AOH_stored/",
+                 gsub(" ", "_", sRL_decode(scientific_name)),
+                 "_", sRL_userdecode(username),
+                 "/Storage_SP.rds")
+  list(exists = file.exists(FILE))
+}
+
 #* @get species/<scientific_name>/analysis/coo/SystemPref
 #* @param scientific_name:string Scientific Name
 #* @serializer unboxedJSON
@@ -1305,7 +1442,7 @@ Prom<-future({
   # Plot
   return(Leaflet_COO)
 
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 
@@ -1368,7 +1505,7 @@ Prom<-future({
     plot_eoo = plot3
   ))
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -1410,7 +1547,7 @@ function(scientific_name, username) { # nolint
     
     return(EOO_leaflet)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -1497,8 +1634,11 @@ function(scientific_name, username) {
   
   #Filter param
   scientific_name <- sRL_decode(scientific_name)
-  Storage_SP <- sRL_StoreRead(sRL_decode(scientific_name), username, MANDAT=1)
-  if("SpeciesAssessment" %in% names(Storage_SP)){GL_stored <- Storage_SP$SpeciesAssessment$supplementary_info$generational_length ; if(is.na(GL_stored)){rm(GL_stored)}}
+  # MANDAT=0 so the endpoint also works before the R session exists (e.g. from the batch
+  # form pre-submit). If no Storage_SP.rds is available yet we fall back to GL_file.
+  Storage_SP <- tryCatch(sRL_StoreRead(sRL_decode(scientific_name), username, MANDAT=0),
+                         error=function(e) list())
+  if(is.list(Storage_SP) && "SpeciesAssessment" %in% names(Storage_SP)){GL_stored <- Storage_SP$SpeciesAssessment$supplementary_info$generational_length ; if(is.na(GL_stored)){rm(GL_stored)}}
   
   # If value in API or GL_file we take it, otherwise default=1
   GL_species <- ifelse(
@@ -1611,7 +1751,7 @@ function(scientific_name, username) {
       plot_extract_habitat = plot
     ))
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }  
@@ -1635,13 +1775,14 @@ function(scientific_name, username, habitats_pref= list(), habitats_pref_MARGINA
 # Clean memory
 Prom_clean<-future({
   sRL_loginfo("START - Cleaning memory", scientific_name)
-  sRL_cleaningMemory(Time_limit=180)
+  sRL_cleaningMemory(Time_limit=10080) # 7 days: Storage_SP.rds is on a persistent volume
   sRL_loginfo("END - Cleaning memory", scientific_name)
-}, gc=T, seed=T)
+}, seed=T)
 Prom_clean %...>% print(.)
 
 
 Prom<-future({
+  tryCatch({
   sf::sf_use_s2(FALSE)
   sRL_loginfo("START - AOH API", scientific_name)
   TIC<-Sys.time()
@@ -2019,7 +2160,14 @@ Prom<-future({
   
   
   return(LIST)
-}, gc=T, seed=T)
+  }, error=function(e){
+    sRL_loginfo(paste0("ERROR - AOH API - class: ", paste(class(e), collapse="/"),
+                        " - message: ", conditionMessage(e),
+                        " - call: ", paste(deparse(conditionCall(e)), collapse=" ")),
+                scientific_name)
+    stop(conditionMessage(e))
+  })
+}, seed=T)
 
 return(Prom)
 }
@@ -2101,7 +2249,7 @@ function(scientific_name, username) { # nolint
     
     return(AOH_leaflet)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -2152,7 +2300,7 @@ function(scientific_name, username) { # nolint
     
     return(AOO_leaflet)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -2367,7 +2515,7 @@ Prom<-future({
   
   return(LIST)
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -2458,7 +2606,7 @@ function(scientific_name, username) { # nolint
     
     return(Trends_leaflet)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -2601,7 +2749,7 @@ Prom<-future({
     
     return(LIST)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   ### Return list
   return(Prom)
@@ -2654,7 +2802,7 @@ Prom<-future({
   # Return
   return(List_trendsRS)
 
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -2738,7 +2886,7 @@ function(scientific_name, username, RSproduct) { # nolint
     
     return(RS_leaflet)
     
-  }, gc=T, seed=T)
+  }, seed=T)
   
   return(Prom)
 }
@@ -2964,6 +3112,34 @@ function(scientific_name, username){
 }
 
 
+## Sync storage between users -------
+#* Copy the on-disk R storage for a species from one (isolated) username to another,
+#* e.g. from a batch's hashed r_username back to the canonical preferred_username,
+#* so the wizard / OutputInfo see the batch's results without sharing storage during the run.
+#* @post species/<scientific_name>/assessment/SyncStorage
+#* @param scientific_name:string Scientific Name
+#* @param from_username:string Source username (isolated r_username)
+#* @param to_username:string Destination username (canonical preferred_username)
+#* @serializer unboxedJSON
+#* @tag sRedList
+function(scientific_name, from_username, to_username){
+  scientific_name <- sRL_decode(scientific_name)
+  SCI <- gsub(" ", "_", scientific_name)
+
+  SRC <- paste0("resources/AOH_stored/", SCI, "_", sRL_userdecode(from_username))
+  DST <- paste0("resources/AOH_stored/", SCI, "_", sRL_userdecode(to_username))
+
+  if(!dir.exists(SRC)){
+    return(list(status="error", message="Source storage not found"))
+  }
+
+  dir.create(DST, recursive=TRUE, showWarnings=FALSE)
+  file.copy(list.files(SRC, full.names=TRUE), DST, recursive=TRUE, overwrite=TRUE)
+
+  return(list(status="ok"))
+}
+
+
 ## Assign category -------
 #* Plot Red List category
 #* @post species/<scientific_name>/assessment/red-list-criteria
@@ -3122,10 +3298,10 @@ Prom<-future({
   
   
   sRL_loginfo("Start Countries and refs", scientific_name)
-  output_dir<-paste0(sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList")
+  output_dir<-paste0("resources/Species/Stored_outputs/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList")
   unlink(output_dir, recursive=T)
   unlink(paste0(output_dir, ".zip"), recursive=T)
-  dir.create(output_dir)
+  dir.create(output_dir, recursive=T)
   
   # Countries (but enabling skipping step) + prepare assessments.csv
   if("coo_occ" %in% names(Storage_SP)){
@@ -3305,16 +3481,16 @@ Prom<-future({
     render("sRL_markdown_scripts/General_RMarkDown_script.Rmd",
            output_format="all",
            output_file=paste0("sRedList_report_", sub(" ", "_", scientific_name), ".html"),
-           output_dir=paste0(sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList"),
+           output_dir=paste0("resources/Species/Stored_outputs/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList"),
            knit_root_dir=WD
     )
   }, error=function(e){"Error in creating Markdown report"})
-  
+
   # ZIP folder
   #zip(zipfile = paste0(sub(" ", "_", scientific_name), "_sRedList"), files = paste0(sub(" ", "_", scientific_name), "_sRedList"),  zip = "C:/Program Files/7-Zip/7z", flags="a -tzip")
   sRL_loginfo("Start ZIP", scientific_name)
   unlink(paste0(output_dir, "/allfieldsTEMPORARY.csv"))
-  zip(zipfile = paste0(sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip"), files = paste0(sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList"), extras = '-j')
+  zip(zipfile = paste0("resources/Species/Stored_outputs/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip"), files = output_dir, extras = '-j')
   
   
   # Return
@@ -3326,7 +3502,7 @@ Prom<-future({
     )
   )
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 
@@ -3346,7 +3522,8 @@ function(scientific_name, username) {
 
   
   # Charge ZIP file
-  zip_to_extract<-readBin(paste0(gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip"), "raw", n = file.info(paste0(gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip"))$size)
+  zip_path<-paste0("resources/Species/Stored_outputs/", gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip")
+  zip_to_extract<-readBin(zip_path, "raw", n = file.info(zip_path)$size)
   
   
   # Prepare Outputs (remove definitions, empty fields, those at default)
@@ -3378,12 +3555,7 @@ function(scientific_name, username) {
     saveRDS(Saved_output, FileStored)
   }, error=function(e){cat("TryCatch save output while zipping")})
 
-  # Remove the local files
-  unlink(paste0(gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList"), recursive=T)
-  unlink(paste0("resources/AOH_stored/", sub(" ", "_", scientific_name), "_", sRL_userdecode(username)), recursive=T)
-  unlink(paste0(gsub(" ", "_", scientific_name), "_", sRL_userdecode(username), "_sRedList.zip"), recursive=T)
-
-  # Return
+  # Return (files kept on disk for re-download; user deletes via dashboard)
   return(zip_to_extract)
 }
 
@@ -3476,7 +3648,7 @@ Prom<-future({
   }
   return(distributions)
 
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -3506,7 +3678,7 @@ Prom<-future({
 
   return(species_distribution[indices, ])
 
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -3538,7 +3710,7 @@ Prom<-future({
     not_found("Species distribution does not exist!") # nolint
   }
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -3604,7 +3776,7 @@ Prom<-future({
     
   }else {return(list())} # nolint
   
-}, gc=T, seed=T)
+}, seed=T)
   
 return(Prom)
 }
@@ -3802,7 +3974,7 @@ Prom<-future({
   
   return(zip_to_extract)
 
-}, gc=T, seed=T)  %>% then(onRejected=function(err){
+}, seed=T)  %>% then(onRejected=function(err){
 
                               res$setHeader("Access-Control-Expose-Headers","Content-Disposition")
                               res$setHeader("Content-Disposition", "attachment; error.txt")

@@ -22,3 +22,10 @@ function(req, res) {
     plumber::forward()
   }
 }
+
+#* Health check for Kubernetes liveness/readiness probes
+#* @get /health
+#* @serializer unboxedJSON
+function() {
+  list(status = "ok")
+}

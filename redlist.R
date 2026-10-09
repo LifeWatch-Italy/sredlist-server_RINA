@@ -59,7 +59,7 @@ Prom<-future({
 
   return(list(result=speciesLIST))
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }
@@ -80,7 +80,7 @@ function(scientific_name) {
     if(exists("HistoPlot")==F){HistoPlot<-ggplot()+labs(title="The Red List API is not working, sorry!", subtitle="We cannot provide the usual information on this page, but you can click Next")}
     
     HistoPlot
-   }, gc=T, seed=T) %>% then(onRejected=function(err) {return(ggplot()+ggtitle("ERROR: we are not able to create this plot, please report that error")+labs(subtitle=err))})
+   }, seed=T) %>% then(onRejected=function(err) {return(ggplot()+ggtitle("ERROR: we are not able to create this plot, please report that error")+labs(subtitle=err))})
 
   return(Prom %...>% plot())
 }
@@ -127,14 +127,14 @@ function(scientific_name, username, Dist_path = "") {
                   ggtitle("")
       
       # Save
-      Storage_SP<-sRL_StoreRead(scientific_name, username, MANDAT=1)
-      if(exists("Storage_SP")==F){Sys.sleep(3) ; Storage_SP<-sRL_StoreRead(scientific_name, username, MANDAT=1)}
+      Storage_SP<-sRL_StoreRead(scientific_name, username, MANDAT=0)
+      if(exists("Storage_SP")==F){Sys.sleep(3) ; Storage_SP<-sRL_StoreRead(scientific_name, username, MANDAT=0)}
       Storage_SP$CountrySP_saved=CountrySP
       sRL_StoreSave(scientific_name, username, Storage_SP)
       }
   
     Plot_Dist
-    }, gc=T, seed=T) %>% then(onRejected=function(err) {return(ggplot()+ggtitle("ERROR: we are not able to create this plot, please report that error")+labs(subtitle=err))})
+    }, seed=T) %>% then(onRejected=function(err) {return(ggplot()+ggtitle("ERROR: we are not able to create this plot, please report that error")+labs(subtitle=err))})
   
     ### Plot the distribution
     return(Prom %...>% plot())
@@ -194,7 +194,7 @@ function(scientific_name, username) {
       
       return(hab_pref)
       
-    }, gc=T, seed=T)
+    }, seed=T)
     
     return(Prom)
     
@@ -276,12 +276,16 @@ Prom<-future({
   if(is.na(alt_pref$elevation_lower)==T){alt_pref$elevation_lower<-0 ; alt_pref$src_lower<-"default"}
   if(is.na(alt_pref$elevation_upper)==T){alt_pref$elevation_upper<-9000 ; alt_pref$src_upper<-"default"}
   
+  # Add original value for tooltip
+  alt_pref$original_lower <- paste0(ifelse(alt_pref$src_lower[1]=="default", "Original value by default: ", ifelse(grepl("calculated", alt_pref$src_lower[1]), "Original value calculated from range: ", "Original value retrieved from last assessment: ")), alt_pref$elevation_lower[1])
+  alt_pref$original_upper <- paste0(ifelse(alt_pref$src_upper[1]=="default", "Original value by default: ", ifelse(grepl("calculated", alt_pref$src_upper[1]), "Original value calculated from range: ", "Original value retrieved from last assessment: ")), alt_pref$elevation_upper[1])
+  
   sRL_loginfo("END - Altitude extract", scientific_name)
   sRL_StoreSave(scientific_name, username, Storage_SP)
   
   return(as.list(alt_pref))
   
-}, gc=T, seed=T)
+}, seed=T)
 
 return(Prom)
 }

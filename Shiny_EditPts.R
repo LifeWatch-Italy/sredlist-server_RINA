@@ -1,5 +1,5 @@
 # Set working directory (Victor path if we are on his laptop, LifeWatch path otherwise)
-setwd(dir=ifelse(file.exists("C:/Users/Victor"),"C:/Users/Victor/Documents/sRedList/Platform/InProgress/sredlist-server-develop", "/media/docker/sRedList/sredlist-server"))
+setwd(dir=ifelse(file.exists("C:/Users/TERRA"),"C:/Users/TERRA/Documents/sRedList/InProgress/sredlist-server", "/media/docker/sRedList/sredlist-server"))
 
 
 library(shiny)
@@ -59,7 +59,7 @@ ui <- page_fillable(
                           editModUI("map", height=600, width = "100%"),
                           
                           # Version number (just for Victor to ensure the correct version is deployed)
-                          conditionalPanel(condition='input.user=="victor.cazalis"', paste0("version 1.5_prodSept deployed on ", as.character(Sys.Date())))
+                          conditionalPanel(condition='input.user=="victor.cazalis"', paste0("version 1.6_devJan deployed on ", as.character(Sys.Date())))
                         ),
                         sidebarPanel(
                           titlePanel("Drag existing records"),
@@ -80,7 +80,14 @@ ui <- page_fillable(
       
       accordion_panel("Explore non-georeferenced records", icon = bsicons::bs_icon("search"),
                       actionButton("GetNonGeo", "Get GBIF non-georeferenced records", style="color: #fff; background-color: #009138ff; border-color: #009138ff"),
-                      DTOutput("Table_nongeoDT")
+                      conditionalPanel(condition='Warn_LimitNonGeo', htmlOutput("Warn_LimitNonGeo")),
+                      conditionalPanel(condition='input.GetNonGeo', 
+                                       h2("Summary per country"),
+                                       DTOutput("Table_nongeoDT_SUMMARY", width="50%"),
+                                       HTML("<br>"),
+                                       h2("Individual records"),
+                                       DTOutput("Table_nongeoDT")
+                                       )
                       )
     )
 )
@@ -107,8 +114,8 @@ server <- function(input, output, session) {
   flagsSF <- reactiveVal()
   flags <- reactiveVal()
   Storage_SP <- reactiveVal()
-  Table_nongeo <- reactiveVal(data.frame())
-  
+  Table_nongeo <- reactiveVal(list())
+  Warn_LimitNonGeo <- reactiveVal(F)
   
   ### Events ---------
 
@@ -171,14 +178,26 @@ server <- function(input, output, session) {
                                 hasCoordinate = F, 
                                 limit=1000
     )$data
+    if(nrow(dat_nongeo)==1000){Warn_LimitNonGeo(T)}
     
     # Create table
     if(is.null(nrow(dat_nongeo))==F){
+      # Raw table
       Tab <- dat_nongeo %>%
         mutate(Link=paste0("<a href='https://gbif.org/occurrence/", .$gbifID, "' target='_blank'>Link</a>")) %>%
-        .[, names(.) %in% c("scientificName", "basisOfRecord", "eventDate", "higherGeography", "continent", "country", "locality", "institutionCode", "collectionCode", "occurrenceRemarks", "Link")]
+        .[, names(.) %in% c("scientificName", "basisOfRecord", "eventDate", "higherGeography", "continent", "country", "locality", "institutionCode", "collectionCode", "occurrenceRemarks", "identifiedBy", "Link")]
       
-      Table_nongeo(Tab)
+      # Summary table
+      if(! "country" %in% names(dat_nongeo)){dat_nongeo$country <- NA}
+      if(! "locality" %in% names(dat_nongeo)){dat_nongeo$locality <- NA}
+      Tab_summ <- dat_nongeo %>% 
+        group_by(country) %>% 
+        summarise(Localities=locality %>% unique() %>% na.omit() %>% paste0(collapse="<br>"), 
+                  Number_records=n()
+                  )
+      
+      # Update tables
+      Table_nongeo(list(Raw=Tab, Summary=Tab_summ))
     }
     
     # End loader
@@ -205,8 +224,8 @@ server <- function(input, output, session) {
     Storage_SPNEW$Output$Count[Storage_SPNEW$Output$Parameter=="Gbif_EditPts"]<-Storage_SPNEW$Output$Count[Storage_SPNEW$Output$Parameter=="Gbif_EditPts"]+1
     
     # Save table nongeo
-    if(nrow(Table_nongeo())>0){Storage_SPNEW$TableNonGeo <- Table_nongeo()}
-
+    if(length(Table_nongeo())>0){if(nrow(Table_nongeo()$Raw)>0){Storage_SPNEW$TableNonGeo <- Table_nongeo()}}
+    
     # Save Storage file
     sRL_StoreSave(input$sci_name, input$user,  Storage_SPNEW)
     Storage_SP(Storage_SPNEW)
@@ -264,9 +283,9 @@ server <- function(input, output, session) {
   })
   
   output$Table_nongeoDT <- renderDataTable({
-    req(input$GetNonGeo & nrow(Table_nongeo())>0)
+    req(input$GetNonGeo & nrow(Table_nongeo()$Raw)>0)
     datatable(
-      Table_nongeo(),
+      Table_nongeo()$Raw,
       escape = FALSE,
       filter="top",
       options = list(pageLength = 50,
@@ -275,8 +294,21 @@ server <- function(input, output, session) {
                        "  $(thead).css('font-size', '0.75em');",
                        "}")
       ),
-      rownames=FALSE) %>% DT::formatStyle(columns = c(1:ncol(Table_nongeo())), fontSize = '75%')
+      rownames=FALSE) %>% DT::formatStyle(columns = c(1:ncol(Table_nongeo()$Raw)), fontSize = '75%')
   })
+  
+  output$Table_nongeoDT_SUMMARY <- renderDataTable({
+    req(input$GetNonGeo & nrow(Table_nongeo()$Summary)>0)
+    datatable(
+      Table_nongeo()$Summary,
+      escape = FALSE,
+      filter="none",
+      options = list(pageLength = 200, 
+                     dom="t"),
+      rownames=FALSE) %>% DT::formatStyle(columns = 2, fontSize = '70%')
+  })
+  
+  output$Warn_LimitNonGeo <- renderText({ifelse(Warn_LimitNonGeo(), "<br><i>Warning: More than 1000 non-georeferenced records are available in GBIF, we only show the last 1000.</i><br><br>", "")})
 }
 
 

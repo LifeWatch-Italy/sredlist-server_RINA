@@ -276,7 +276,11 @@ sRL_StoreSave<-function(scientific_name, username, Storage_SP){
   FOLDER<-paste0("resources/AOH_stored/", gsub(" ", "_", SCI), "_", sRL_userdecode(username))
   FILE=paste0(FOLDER, "/Storage_SP.rds")
   dir.create(paste0(FOLDER, "/Plots"), recursive=T, showWarnings=F)
-  saveRDS(Storage_SP, file=FILE)
+  # Write to a temp file then rename (atomic on the same filesystem), so a
+  # concurrent sRL_StoreRead never sees a half-written file
+  TMP<-tempfile(pattern="Storage_SP_", tmpdir=FOLDER, fileext=".rds.tmp")
+  saveRDS(Storage_SP, file=TMP)
+  if(!file.rename(TMP, FILE)){unlink(TMP); saveRDS(Storage_SP, file=FILE)}
 }
 
 sRL_StoreRead<-function(scientific_name, username, MANDAT){
@@ -346,16 +350,17 @@ sRL_cleaningMemory<-function(Time_limit){
   
   tryCatch({
   # Remove ZIP files + pre-zip folders + merged zip
-  list_zips<-c(list.files()[grepl("_sRedList", list.files())], list.files()[grepl("Unzipped", list.files())])
+  stored_outputs_dir<-"resources/Species/Stored_outputs"
+  list_zips<-c(list.files(stored_outputs_dir, full.names=T)[grepl("_sRedList", list.files(stored_outputs_dir))], list.files(stored_outputs_dir, full.names=T)[grepl("Unzipped", list.files(stored_outputs_dir))])
   if(length(list_zips)>0){
     Time_diff_zips<-difftime(Time_now, file.info(list_zips)$atime, units="mins") %>% as.numeric(.)
     toremove_zips<-list_zips[Time_diff_zips>Time_limit]
     unlink(toremove_zips, recursive=T)
-    zips_prop_removed<- (length(list_zips)-length(list.files()[grepl(".zip", list.files())]))
+    zips_prop_removed<- (length(list_zips)-length(list.files(stored_outputs_dir, full.names=T)[grepl(".zip", list.files(stored_outputs_dir))]))
     cat(paste0(length(toremove_zips), " / ", length(list_zips), " zip files should be removed, (", zips_prop_removed, " were correctly removed)", "\n"))
-    
+
   }
-  } ,error=function(e){cat("Problem removing Zip files")}) 
+  } ,error=function(e){cat("Problem removing Zip files")})
   
   
   

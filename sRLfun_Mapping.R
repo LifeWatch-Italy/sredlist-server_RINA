@@ -43,8 +43,8 @@ sRL_LeafletComparison <- function(flags, distSP, Comparison_result){
   # Prepare map
   Leaf <- leaflet(flags) %>%
     addTiles(group="OpenStreetMap") %>%
-    addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-    addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+    addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+    addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
     addPolygons(data=distSP, color=distSP$cols, fillColor=distSP$cols, stroke=F, weight=2, fillOpacity=0.7) %>%
     addCircleMarkers(lng=flags$decimalLongitude,
                      lat=flags$decimalLatitude,
@@ -93,7 +93,7 @@ sRL_FormatUploadedRecords <- function(Uploaded_Records, scientific_name, Gbif_Sy
   if(ncol(Uploaded_Records)==1){print("CSV with wrong separator with ; separator"); Uploaded_Records<-Uploaded_Records %>% separate(col=names(Uploaded_Records)[1], into=unlist(strsplit(names(Uploaded_Records), ";")), sep=";")}
   if(ncol(Uploaded_Records)==1){print("CSV with wrong separator with tab separator"); Uploaded_Records<-Uploaded_Records %>% separate(col=names(Uploaded_Records)[1], into=unlist(strsplit(names(Uploaded_Records), "\t")), sep="\t")}
   if(ncol(Uploaded_Records)==1){wrong_csv_upload()}
-  
+
   # Check sci_name is provided (otherwise use scientific_name) and rename column + if only NA or empty, use scientific_name too
   if(!"sci_name" %in% names(Uploaded_Records)){
     names(Uploaded_Records)<-replace(names(Uploaded_Records), tolower(names(Uploaded_Records)) %in% c("sci_name", "binomial", "species", "scientific_name", "species_name"), "sci_name")
@@ -103,7 +103,10 @@ sRL_FormatUploadedRecords <- function(Uploaded_Records, scientific_name, Gbif_Sy
   if(as.logical(table(factor(is.na(replace(Uploaded_Records$sci_name, Uploaded_Records$sci_name=="", NA)), c("TRUE", "FALSE")))["FALSE"]==0)){Uploaded_Records$sci_name<-scientific_name}
   
   # If another species name than scientific_name, return an error (I could deal with it but this might introduce errors that users won't see)
-  if(as.logical(table(factor(Uploaded_Records$sci_name %in% c(scientific_name, Gbif_Synonym, NA, ""), c("TRUE", "FALSE")))["FALSE"] >0)){wrong_species_upload()}
+  NChar <- nchar(Uploaded_Records$sci_name)
+  Uploaded_Records$sci_name <- ifelse(substr(Uploaded_Records$sci_name, NChar, NChar)==" ", substr(Uploaded_Records$sci_name, 1, NChar-1), Uploaded_Records$sci_name) 
+  Wrong_SpName <- which(! Uploaded_Records$sci_name == scientific_name)
+  if(length(Wrong_SpName)>0){wrong_species_upload(Wrong_SpName)}
   
   # Assign Source to Upload (and Synonyms_Upload if synonym)
   Uploaded_Records$Source_type<-"Uploaded"
@@ -115,25 +118,38 @@ sRL_FormatUploadedRecords <- function(Uploaded_Records, scientific_name, Gbif_Sy
   if(! "dec_lat" %in% names(Uploaded_Records)){names(Uploaded_Records)<-replace(names(Uploaded_Records), tolower(names(Uploaded_Records)) %in% c("y", "dec_lat", "latitude", "lat"), "dec_lat")}
   if(! "dec_long" %in% names(Uploaded_Records)){names(Uploaded_Records)<-replace(names(Uploaded_Records), tolower(names(Uploaded_Records)) %in% c("x", "dec_long", "dec_lon", "longitude", "lon", "long"), "dec_long")}
   if((! "dec_long" %in% names(Uploaded_Records)) | (! "dec_lat" %in% names(Uploaded_Records))){no_coords_update()}
-  Uploaded_Records<-subset(Uploaded_Records, is.na(Uploaded_Records$dec_long)==F & is.na(Uploaded_Records$dec_lat)==F)
 
   # Make longitude and latitude numeric (includes a comma to point transformation for decimals)
   Uploaded_Records$dec_long<-Uploaded_Records$dec_long %>% sub(",", ".", .) %>% as.numeric()
   Uploaded_Records$dec_lat<-Uploaded_Records$dec_lat %>% sub(",", ".", .) %>% as.numeric()
   
   # Check they are within -180:180 and -90:90
-  if(min(Uploaded_Records$dec_long)<(-180) |
-     max(Uploaded_Records$dec_long)>(180) |
-     min(Uploaded_Records$dec_lat)<(-90) |
-     max(Uploaded_Records$dec_lat)>(90)){coords_outofbound()}
+  Wrong_lines <- c(
+    which(Uploaded_Records$dec_long<(-180)),
+    which(Uploaded_Records$dec_long>(180)),
+    which(Uploaded_Records$dec_lat<(-90)),
+    which(Uploaded_Records$dec_lat>(90))
+  ) %>% unique() %>% sort()
+  if(length(Wrong_lines)>0){coords_outofbound(LINES=Wrong_lines)}
+
+  # Subset and warning if missing lon / lat
+  Lines_NA <- c(which(is.na(Uploaded_Records$dec_long)), which(is.na(Uploaded_Records$dec_lat))) %>% unique() %>% sort()
+  if(length(Lines_NA)>0){
+    Uploaded_Records <- subset(Uploaded_Records, is.na(dec_long)==F & is.na(dec_lat)==F)
+    Warning_Upload <- paste0("Some coordinates were missing from uploaded records (lines: ", paste0(Lines_NA[1:min(c(50, length(Lines_NA)))], collapse=", "), ifelse(length(Lines_NA)>50, ", ...)", ")"), "; they have been removed from the Uploaded data.\n")
+  } else{Warning_Upload <- ""}
   
   # Transform column name of year and make it numeric (if no column, I make it all NA)
   names(Uploaded_Records)<-replace(names(Uploaded_Records), tolower(names(Uploaded_Records)) %in% c("year", "event_year", "year_event"), "year")
   if(! "year" %in% names(Uploaded_Records)){Uploaded_Records$year<-NA}
   Uploaded_Records$year<-as.numeric(as.character(Uploaded_Records$year))
-
+  
+  
   # Return
-  return(Uploaded_Records)
+  return(list(
+    Uploaded_Records=Uploaded_Records,
+    Warning_Upload=Warning_Upload
+  ))
 }
 
 
@@ -177,6 +193,9 @@ sRL_ShapeCountryNRL <- function(Country_name, scientific_name){
 ### Function to create occurrence records 
 sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded_Records) { # nolint
   
+  ### Reuse Warning from upload if it exists (otherwise start from empty string); used to warn if number of records above limit or if some uploaded lines were removed
+  Warning_Create <- ifelse("Warning_Upload" %in% names(Uploaded_Records), Uploaded_Records$Warning_Upload, "")
+  
   ### If Gbif_Country, prepare countries file
   if(Gbif_Country != ""){
     
@@ -196,13 +215,17 @@ sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded
     sRL_loginfo("Download GBIF", scientific_name)
     
     # Calculate the total number of data in GBIF
-    OCC<-occ_count(taxonKey=TaxKey, hasCoordinate = TRUE)
-    
+    OCC <- occ_count(taxonKey=TaxKey, 
+                     hasCoordinate = TRUE,
+                     decimalLongitude=paste(co_EXT[1], co_EXT[2], sep=","), 
+                     decimalLatitude=paste(co_EXT[3], co_EXT[4], sep=",")
+                     )
 
     if(OCC < config$LIM_GBIF){ # Download all data or structure download if more than LIM_GBIF
       dat_gbif <- sRL_SimpleGBIF(scientific_name, co_EXT)
     } else{
       dat_gbif <- sRL_StructureGBIF(scientificName = scientific_name, co_EXT, co_tot)
+      Warning_Create <- paste0(Warning_Create, "The number of records available on GBIF was >2000, we downloaded a representative sample.\n")
     }
     
     dat_gbif$ID<-paste0(dat_gbif$decimalLongitude, dat_gbif$decimalLatitude, dat_gbif$year)
@@ -240,6 +263,7 @@ sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded
       dat_obis_sub$Source_type<-"OBIS sample"
       dat_obis_sub<-dat_obis_sub[order(dat_obis_sub$year, decreasing=T),]
       dat_obis_sub<-dat_obis_sub[1:config$LIM_GBIF,]
+      Warning_Create <- paste0(Warning_Create, "The number of records available on OBIS was >2000, we downloaded only a subset.\n")
     }
   } else {dat_obis_sub<-data.frame()}
   
@@ -265,14 +289,15 @@ sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded
       dat_RL$Source_type<-"Red List sample"
       dat_RL<-dat_RL[order(dat_RL$year, decreasing=T),]
       dat_RL<-dat_RL[1:config$LIM_GBIF,]
+      Warning_Create <- paste0(Warning_Create, "The number of records available on the Red List was >2000, we kept only a subset.\n")
     }
   } else {dat_RL<-data.frame()}
   
   
   # From uploaded data
-  if(!is.null(nrow(Uploaded_Records))){
+  if("Uploaded_Records" %in% names(Uploaded_Records)){if(!is.null(nrow(Uploaded_Records$Uploaded_Records))){
     sRL_loginfo("Download Uploaded Records", scientific_name)
-    dat_upload<-Uploaded_Records
+    dat_upload<-Uploaded_Records$Uploaded_Records
     dat_upload$decimalLongitude<-dat_upload$dec_long
     dat_upload$decimalLatitude<-dat_upload$dec_lat
     dat_upload$species<-dat_upload$sci_name
@@ -288,8 +313,9 @@ sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded
     if(nrow(dat_upload) > 3*config$LIM_GBIF){
       dat_upload$Source_type<-"Uploaded sample"
       dat_upload<-dat_upload[1:(3*config$LIM_GBIF),]
+      Warning_Create <- paste0(Warning_Create, "The number of records uploaded was >6000, we kept only a subset.\n")
     }
-  } else {dat_upload<-data.frame()}
+  } else {dat_upload<-data.frame()}} else {dat_upload<-data.frame()}
 
   
   # Return empty df if no records
@@ -325,7 +351,11 @@ sRL_createDataGBIF <- function(scientific_name, GBIF_SRC, Gbif_Country, Uploaded
     }
   }
   
-  return(dat)
+  return(list(
+    dat=dat,
+    Warning_Create=Warning_Create
+    )
+  )
 }
 
 
@@ -355,126 +385,90 @@ sRL_StructureGBIF<-function(scientificName, co_EXT, co_tot){
   Fetch<-mvt_fetch(taxonKey = name_backbone(name=scientificName)$usageKey, srs = "EPSG:4326", format="@4x.png") 
   Fetch<-st_crop(Fetch, xmin=max(-180,(co_EXT[1]-1)), xmax=min(180,(co_EXT[2]+1)), ymin=max(-90,(co_EXT[3]-1)), ymax=min(180,(co_EXT[4]+1))) # Crop by co_Ext with 1 degree buffer (max distance between two sampling points) to ensure we don't exclude points close to the border
   if(nrow(Fetch)==0){no_records()}
-  coords<-as.data.frame(st_coordinates(Fetch))
-  coords$tot<-Fetch$total
+  
+  ### Restrict if Crop by country
+  if(is.null(co_tot)==F){
+    Fetch <- st_filter(Fetch, st_buffer(co_tot, 1), join=st_intersects)
+  }
   
   ### Extract extent to define grid size
+  coords<-as.data.frame(st_coordinates(Fetch))
   DeltaX<-max(coords$X, na.rm=T)-min(coords$X, na.rm=T)
   DeltaY<-max(coords$Y, na.rm=T)-min(coords$Y, na.rm=T)
   
-  ### Fix cell size
-  # Maximum size cell in degrees
-  Max_Cell=10 
+  ### Fix maximum size cell in degrees
+  Max_Cell=10
   
   # If extent is small, cut the grid in ca. 100 square cells
   if(max(DeltaX, DeltaY) < (10*Max_Cell)){
-    NX<- round(10*DeltaX / sqrt(DeltaX*DeltaY)) %>% min(., length(unique(coords$X))) # Calculates the number of cells to have in one row so that we end up with ca. 100 square cells; then take number of existing cells if that's lower
-    NY<- round(10*DeltaY / sqrt(DeltaX*DeltaY)) %>% min(., length(unique(coords$Y)))
-    Lon_breaks<-seq((min(coords$X, na.rm=T)-1), max(coords$X, na.rm=T)+1, length.out=(NX+1))
-    Lat_breaks<-seq((min(coords$Y, na.rm=T)-1), max(coords$Y, na.rm=T)+1, length.out=(NY+1))
-    
-    # If extent is large, cut the grid in Max_Cell square cells
+    NX <- round(10*DeltaX / sqrt(DeltaX*DeltaY)) %>% min(., length(unique(coords$X))) # Calculates the number of cells to have in one row so that we end up with ca. 100 square cells; then take number of existing cells if that's lower
+    NY <- round(10*DeltaY / sqrt(DeltaX*DeltaY)) %>% min(., length(unique(coords$Y)))
+  # If extent is large, cut the grid in Max_Cell square cells
   } else{
-    Lon_breaks<-seq((min(coords$X, na.rm=T)-1), max(coords$X, na.rm=T)+1, length.out=ceiling(DeltaX/Max_Cell))
-    Lat_breaks<-seq((min(coords$Y, na.rm=T)-1), max(coords$Y, na.rm=T)+1, length.out=ceiling(DeltaY/Max_Cell))
+    NX=ceiling(DeltaX/Max_Cell)
+    NY=ceiling(DeltaY/Max_Cell)
   }
   
-  ### Cut density lon/lat and create group names
-  coords$Lon_group<-coords$X %>% cut(., breaks=Lon_breaks, labels=paste0("X", 1:(length(Lon_breaks)-1)))
-  coords$Lat_group<-coords$Y %>% cut(., breaks=Lat_breaks, labels=paste0("Y", 1:(length(Lat_breaks)-1)))
-  coords$Group<-paste(coords$Lon_group, coords$Lat_group, sep="/")
+  ### Create download grid and filter with fetch
+  buff_Fetch <- st_union(st_buffer(Fetch, 1, endCapStyle = "SQUARE"))
+  grid_sf<-st_make_grid(buff_Fetch, n=c(NX, NY), what="polygons") %>% st_as_sf()
+  grid_sub <- st_filter(grid_sf, buff_Fetch, join=st_intersects)
   
-  
-  
-  ##### CREATE DOWNLOAD TABLE
-  TAB<-ddply(coords, .(Lon_group, Lat_group), function(x){data.frame(
-    N=sum(x$tot, na.rm=T),
-    Group=paste0(x$Lon_group[1], x$Lat_group[1])
-  )}) %>% subset(., .$N>0)
-  
-  # Extract coordinates (min and max) from Group names and cuts of lon/lat and add in TAB
-  eval(parse(text=paste("TAB$Lon_min<-revalue(TAB$Lon_group, c(", paste0("'X", 1:(length(Lon_breaks)-1), "'=Lon_breaks[", 1:(length(Lon_breaks)-1), "]", collapse=","), ")) %>% as.character(.) %>% as.numeric(.) %>% replace(., .<(-180), (-180))")))
-  eval(parse(text=paste("TAB$Lon_max<-revalue(TAB$Lon_group, c(", paste0("'X", 1:(length(Lon_breaks)-1), "'=Lon_breaks[", 2:length(Lon_breaks), "]", collapse=","), ")) %>% as.character(.) %>% as.numeric(.) %>% replace(., .>180, 180)")))
-  eval(parse(text=paste("TAB$Lat_min<-revalue(TAB$Lat_group, c(", paste0("'Y", 1:(length(Lat_breaks)-1), "'=Lat_breaks[", 1:(length(Lat_breaks)-1), "]", collapse=","), ")) %>% as.character(.) %>% as.numeric(.) %>% replace(., .<(-90), (-90))")))
-  eval(parse(text=paste("TAB$Lat_max<-revalue(TAB$Lat_group, c(", paste0("'Y", 1:(length(Lat_breaks)-1), "'=Lat_breaks[", 2:length(Lat_breaks), "]", collapse=","), ")) %>% as.character(.) %>% as.numeric(.) %>% replace(., .>90, 90)")))
-  
-  # Restrict by country
-  if(is.null(co_tot)==F){
-
-    ### Create TAB grid polygon
-    lst <- lapply(1:nrow(TAB), function(x){
-      # create a matrix of coordinates
-      res <- matrix(c(TAB[x, 'Lon_max'], TAB[x, 'Lat_min'],
-                      TAB[x, 'Lon_max'], TAB[x, 'Lat_max'],
-                      TAB[x, 'Lon_min'], TAB[x, 'Lat_max'],
-                      TAB[x, 'Lon_min'], TAB[x, 'Lat_min'],
-                      TAB[x, 'Lon_max'], TAB[x, 'Lat_min'])
-                    , ncol =2, byrow = T
-      )
-
-      st_polygon(list(res))
-    })
-    Grid_TAB <- st_sf(Group = TAB[, 'Group'], lst, crs=st_crs(4326))
-
-    # Remove grid cells that are not in the country of interest
-    Inters<-st_intersection(Grid_TAB, co_tot)
-    TAB <- subset(TAB, TAB$Group %in% Inters$Group)
-    
-    # Restrict grid cells that only partially overlap
-    for(CELL in 1:nrow(TAB)){
-      Coord_cell<-extent(Inters[CELL,])
-      TAB[CELL, c("Lon_min", "Lon_max", "Lat_min", "Lat_max")] <- as.vector(extent(Inters[Inters$Group==TAB$Group[CELL],]))
-    }
-    
-    # Adjust N based on the remaining area of each cell
-    Inters$Area <- as.numeric(st_area(Inters)) ; Areas <- ddply(Inters, .(Group), function(x){data.frame(Area_prop=sum(x$Area, na.rm=T)/max(Inters$Area, na.rm=T))})
-    TAB$N <- round(TAB$N * Areas$Area_prop[match(TAB$Group, Areas$Group)])
-    
-    if(nrow(TAB)==0){no_records()}
+  ### Calculate N available per cell
+  grid_sub$N<-NA
+  for(i in 1:nrow(grid_sub)){
+    grid_sub$N[i] <- occ_count(taxonKey=name_backbone(name=scientificName)$usageKey, hasCoordinate = TRUE, geometry=st_as_text(st_geometry(grid_sub[i,])))
   }
+  grid_sub <- subset(grid_sub, grid_sub$N>0)
 
-  # Determine number of data to download per group to sum at LIM_GBIF (increased a bit if Crop_Country)
+  ### Determine number of data to download per group to sum at LIM_GBIF (increased a bit if Crop_Country)
   LIMgbif<-ifelse(is.null(co_tot), config$LIM_GBIF, 1.25*config$LIM_GBIF)
-  TAB$N_download<-ifelse(TAB$N < (LIMgbif/nrow(TAB)), TAB$N, NA)
-  TAB$N_download[is.na(TAB$N_download)]<-round((LIMgbif-sum(TAB$N_download, na.rm=T))/nrow(TAB[is.na(TAB$N_download),]))
-  TAB$N_download<-ifelse((TAB$N_download>TAB$N), TAB$N, TAB$N_download)
+  grid_sub$N_download <- ifelse(grid_sub$N < (LIMgbif/nrow(grid_sub)), grid_sub$N, NA)
+  grid_sub$N_download[is.na(grid_sub$N_download)] <- round((LIMgbif-sum(grid_sub$N_download, na.rm=T))/nrow(grid_sub[is.na(grid_sub$N_download),]))
+  grid_sub$N_download <- ifelse((grid_sub$N_download>grid_sub$N), grid_sub$N, grid_sub$N_download)
   i=0
   while(i<LIMgbif){
-    if(sum(TAB$N_download) < sum(TAB$N)){ # If not all columns are complete I add only to those not full, otherwise to all columns (happens as Fetch only includes data with year)
-      TAB$N_download[TAB$N_download<TAB$N]<-TAB$N_download[TAB$N_download<TAB$N]+1
-    } else {TAB$N_download<-ceiling(TAB$N_download*1.05)}
-    i=sum(TAB$N_download)
+    if(sum(grid_sub$N_download) < sum(grid_sub$N)){ # If not all columns are complete I add only to those not full, otherwise to all columns (happens as Fetch only includes data with year)
+      grid_sub$N_download[grid_sub$N_download<grid_sub$N] <- grid_sub$N_download[grid_sub$N_download<grid_sub$N]+1
+    } else {grid_sub$N_download <- ceiling(grid_sub$N_download*1.05)}
+    i=sum(grid_sub$N_download)
   }
-
+  
   ##### STRUCTURE DOWNLOAD
   # Download one data (just for column names)
-  dat_structured<-rgbif::occ_data(scientificName=scientificName, hasCoordinate = T, limit=1)$data
+  dat_structured<-rgbif::occ_data(scientificName=scientificName, hasCoordinate = T, limit=1)$data[0,]
   
   # Download group per group
-  for(GR in 1:nrow(TAB)){
+  for(GR in 1:nrow(grid_sub)){
     dat_GR<-rgbif::occ_data(scientificName=scientificName,
-                              hasCoordinate = T, 
-                              limit=TAB$N_download[GR], 
-                              decimalLongitude=paste(TAB$Lon_min[GR], TAB$Lon_max[GR], sep=","), 
-                              decimalLatitude=paste(TAB$Lat_min[GR], TAB$Lat_max[GR], sep=",")
-    )$data 
+                            hasCoordinate = T, 
+                            limit=grid_sub$N_download[GR], 
+                            geometry=st_as_text(st_geometry(grid_sub[GR,]))
+    )$data %>% as.data.frame() %>% mutate(Group=GR) 
 
     if(is.null(nrow(dat_GR))==F){dat_structured<-rbind.fill(dat_structured, dat_GR)}
   }
   
-  # Merge
-  dat_structured<-dat_structured[2:nrow(dat_structured),]
-  
-  ### If for some reason, we have few records (<500), re-run a non-representative download and save an empty file to record this happened
-  if(nrow(dat_structured) < (config$LIM_GBIF/4)){
+  ### If for some reason, we have few records (<1000), re-run a non-representative download and save an empty file to record this happened
+  if(nrow(dat_structured) < (0.5*config$LIM_GBIF)){
     dat_structured <- sRL_SimpleGBIF(scientificName, co_EXT)
-    print(paste0("Non-representative sample downloaded for ", scientificName, ".csv"))
-    write.csv("", paste0("Species/Stored_outputs/Non-representative sample downloaded for ", scientificName, ".csv"))
-    }
+    print(paste0("Non-representative sample downloaded for ", scientificName, "_", as.character(Sys.Date()), ".csv"))
+    write.csv("", paste0("Species/Stored_outputs/Non-representative sample downloaded for ", scientificName,  "_", as.character(Sys.Date()), ".csv"))
+  }
   
   dat_structured$Source_type<-"GBIF sample"
   
   print("Finished Structured GBIF download")
+  
+  # ### Plot to check the download went well (comparing with all data for that species)
+  # all_gbif <- rgbif::occ_data(scientificName=scientific_name, hasCoordinate = T, limit=20000)$data
+  # ggplot()+
+  #   geom_point(data=all_gbif, aes(x=decimalLongitude, y=decimalLatitude), col="grey")+
+  #   geom_sf(data=grid_sub, fill=NA)+
+  #   geom_point(data=dat_structured, aes(x=decimalLongitude, y=decimalLatitude), col="darkred")+
+  #   geom_sf_text(data=grid_sub, aes(label=paste0(N_download, " / ", N)))+
+  #   theme_void()+
+  #   ggtitle(scientific_name)
   
   return(dat_structured)
 }
@@ -552,13 +546,12 @@ sRL_cleanDataGBIF <- function(flags, year_GBIF, uncertainty_GBIF, Gbif_yearBin, 
 sRL_SubsetGbif<-function(flags, scientific_name){
   
   # Round coordinates (<1m change); needed to avoid having almost duplicate points in alpha function
-  flags$decimalLongitude<-round(as.numeric(flags$decimalLongitude),5) 
-  flags$decimalLatitude<-round(as.numeric(flags$decimalLatitude),5)
+  flags$decimalLongitude<-round(flags$decimalLongitude,5) 
+  flags$decimalLatitude<-round(flags$decimalLatitude,5)
   
   # Prepare GBIF data for mapping
   dat_cl <- flags[is.na(flags$Reason)==T,] # Keep only data that are not flagged
-  if(nrow(dat_cl)==0){return(data.frame())}
-  
+
   # Prepare spatial points
   dat_proj<-st_as_sf(dat_cl,coords = c("decimalLongitude", "decimalLatitude"), crs="+proj=longlat +datum=WGS84") %>%
     st_transform(., st_crs(CRSMOLL)) 
@@ -573,8 +566,8 @@ sRL_LeafletFlags <- function(flags){
   
   Leaf <- leaflet(flags) %>%
     addTiles(group="OpenStreetMap") %>%
-    addEsriBasemapLayer(esriBasemapLayers$Imagery, group = "Satellite") %>%
-    addEsriBasemapLayer(esriBasemapLayers$Topographic, group = "Topography") %>%
+    addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+    addProviderTiles("Esri.WorldTopoMap", group = "Topography") %>%
     addCircleMarkers(lng=flags$decimalLongitude,
                      lat=flags$decimalLatitude,
                      color=ifelse(is.na(flags$Reason)==T, "#fdcb25ff", "#440154ff"),
@@ -622,7 +615,7 @@ sRL_MapDistributionGBIF<-function(dat, scientific_name, username, First_step, Al
       EX<-extent(dat_subsample)
       tryCatch({
         Alpha_scaled <- (0.5*Par_alpha)^2 * sqrt((EX@xmin-EX@xmax)^2 + (EX@ymin-EX@ymax)^2) %>% as.numeric(.)
-        distGBIF<-spatialEco:::convexHull(dat_subsample, alpha = Alpha_scaled) # concaveman::concaveman function could work as well with something similar, but not proper alpha-hull
+        distGBIF<-sRL_convexHull(dat_subsample, alpha = Alpha_scaled) # concaveman::concaveman function could work as well with something similar, but not proper alpha-hull
       } ,error=function(e){bug_alpha()})
       
       st_crs(distGBIF)<-st_crs(dat_subsample)
@@ -647,12 +640,12 @@ sRL_MapDistributionGBIF<-function(dat, scientific_name, username, First_step, Al
   if(substr(First_step, 1,5)=="hydro"){
     
     # Extract level 8 in any case
-    hydro8_sub<-st_crop(hydro_raw, extent(dat))
+    hydro8_sub<-st_crop(hydro_raw, extent(st_buffer(dat,1))) # Buffer needed in case only 1 point
     interHyd<-st_join(dat, hydro8_sub, join=st_intersects) %>% subset(., is.na(.$hybas_id)==F) # Identify hydrobasins with data 
     distGBIF<-subset(hydro_raw, hydro_raw$hybas_id %in% interHyd$hybas_id) # Isolate these hydrobasins
 
     # Extract level 10 or 12 if requested and possible (i.e., small distribution)
-    if(First_step %in% c("hydro10", "hydro12")){
+    if(First_step %in% c("hydro10", "hydro12") & nrow(distGBIF)>0){
       
       # Return an error if too large distribution
       if(nrow(distGBIF)>10){hydro_too_large()}
@@ -674,7 +667,7 @@ sRL_MapDistributionGBIF<-function(dat, scientific_name, username, First_step, Al
       st_crs(hydroLEV_raw)<-CRSMOLL
       
       # Create distribution
-      hydroLEV_sub<-st_crop(hydroLEV_raw, extent(dat))
+      hydroLEV_sub<-st_crop(hydroLEV_raw, extent(st_buffer(dat,1)))
       interHyd<-st_join(dat, hydroLEV_sub, join=st_intersects) %>% subset(., is.na(.$hybas_id)==F) # Identify hydrobasins with data 
       distGBIF<-subset(hydroLEV_raw, hydroLEV_raw$hybas_id %in% interHyd$hybas_id) # Isolate these hydrobasins
       
@@ -786,9 +779,45 @@ sRL_DistComment <- function(Output, N_dat){
 }
 
 
+### Alpha hull (taken from former version of spatialEco)
+sRL_convexHull <- function(x, alpha = 250000)	{
+  if(!any(which(utils::installed.packages()[,1] %in% "alphahull")))
+    stop("please install alphahull package before running this function")
+  if(!inherits(x, c("SpatialPointsDataFrame", "SpatialPoints", "sf", "sfc", "matrix")))
+    stop(deparse(substitute(x)), " must be a spatial (sf, sp) or matrix object")
+  if(inherits(x, c("sf", "sfc"))) {
+    xy <- as.data.frame(sf::st_coordinates(x))
+  } else if(inherits(x, c("SpatialPointsDataFrame", "SpatialPoints"))) {
+    xy <- as.data.frame(sp::coordinates(x))
+  } else if(inherits(x, "matrix")) {
+    xy <- as.data.frame(x)
+  } else {
+    stop("Not a valid object")
+  }
+  xy <- xy[!duplicated(xy[c(1,2)]),]
+  a <- alphahull::ashape(as.matrix(xy), alpha = alpha)$edges[,3:6]
+  a <- apply(a, 1, function(x)  {
+    v <- as.numeric(x[c(1,3,2,4)])
+    m <- matrix(v, nrow = 2)
+    return(sf::st_sfc(sf::st_linestring(m)))
+  })
+  a <- Reduce(c, a) |>
+    sf::st_combine() |>
+    sf::st_as_sf() |>
+    sf::st_polygonize() |>
+    sf::st_collection_extract(type = "POLYGON")
+  sf::st_geometry(a) <- "geometry"
+  a$ID <- 1
+  if(!is.na(sf::st_crs(x))) {
+    sf::st_crs(a) <- sf::st_crs(x)
+  }
+  return( a )
+}
+
+
 ### Crop distribution (not integrated in sRL_MapDistribution to enable saving the intermediate for smoothing)
 sRL_CropDistributionGBIF <- function(distGBIF, GBIF_crop){
-  
+
   ### Apply crop by land/sea
   if(GBIF_crop %in% c("cropland", "cropsea")){
     

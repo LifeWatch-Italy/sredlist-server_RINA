@@ -1,12 +1,19 @@
 # Set working directory (Victor path if we are on his laptop, LifeWatch path otherwise)
-setwd(dir=ifelse(file.exists("C:/Users/TERRA"),"C:/Users/TERRA/Documents/sRedList/InProgress/sredlist-server_RINA", "/media/docker/sRedList/sredlist-server"))
+setwd(dir=ifelse(file.exists("C:/Users/TERRA"),"C:/Users/TERRA/Documents/sRedList/InProgress/sredlist-server", "/media/docker/sRedList/sredlist-server"))
 
 
 ### Set the asynchronous coding
-options(future.globals.maxSize= 2000*1024^2) # Max 2 GB of RAM per session
+options(future.globals.maxSize= 4000*1024^2) # Max 4 GB of RAM per session
 library(promises) ; library(future) ; library(future.callr)
-future::plan(future.callr::callr) # This plan uses transient parallel workers (better to have spread tasks among workers and release memory)
-#future::plan("multisession") # This plan uses persistent parallel workers (quicker but some RAM accumulation)
+# multisession: persistent workers (spawned once, reused) — avoids the per-call process
+# fork + globals serialization overhead of callr that caused OOM kills (exit code -9).
+# workers=2: reduced from 4 — a single AOH request on a wide-ranging species (e.g.
+# Panthera leo via GBIF) can use ~6-10GB per worker; with 4 concurrent workers the
+# pod's memory cgroup limit (20Gi on the K8s deployment) is exceeded and the whole
+# pod gets OOMKilled. The container's memory limit, not total node RAM, is what
+# bounds this — see k8s/02-r-server.yaml.
+future::plan("multisession", workers = 2)
+#future::plan(future.callr::callr) # transient workers — high RAM spike per call, avoid on memory-constrained hosts
 
 
 ######################
@@ -22,15 +29,13 @@ library(logger)
 library(glue)
 library(urltools)
 library(R.utils)
-library(Rook) ; library(ggplot2) ; library(gridExtra) ; library(raster) ; library(plyr) ;library(dplyr) ; library(tidyr) ; library(sf) ; library(ncdf4) ; library(ggalluvial) ; library(iucnredlist) ;  library(tools) # nolint
+library(Rook) ; library(ggplot2) ; library(gridExtra) ; library(cowplot) ; library(raster) ; library(plyr) ;library(dplyr) ; library(tidyr) ; library(sf) ; library(ncdf4) ; library(ggalluvial) ; library(iucnredlist) ;  library(tools) # nolint
 library(TAF)
 
 ### GBIF mapping
 library(rgbif) ; library(CoordinateCleaner) ; library(maps) ; library(countrycode); library(rnaturalearthdata); library(robis) # nolint
-library(plotly) ; library(mapview) ; library(leaflet) ; library(leaflet.extras) ; library(htmltools) ; library(leafem) ; library(leaflet.esri)
+library(plotly) ; library(mapview) ; library(leaflet) ; library(leaflet.extras) ; library(htmltools) ; library(leafem)
 library(adehabitatHR) ; library(smoothr) ; library(spatialEco) ; library(alphahull)
-library(geojsonio)
-library(data.table)
 
 ### AOH analyses
 library(exactextractr)
@@ -72,6 +77,8 @@ source("sRLfun_AOH.R")
 source("sRLfun_Outputs.R")
 source("sRLfun_OptionalAnalyses.R")
 
+### RINA_API_SETUP_END -- rina_api.R sources this file only up to this marker (see safe_source)
+
 
 ### Specify how logs are written
 if (!fs::dir_exists(config$log_dir)) fs::dir_create(config$log_dir)
@@ -93,8 +100,6 @@ convert_empty <- function(string) {
 # Charge species information from RL
 speciesRL <- readRDS("Species/species-all-page.rds") ; speciesRL$taxonid <- speciesRL$sis_taxon_id
 speciesDDapp <- readRDS("resources/resources_Shiny_DD/DD_prepared_for_ShinyREALMS.rds")
-speciesDDapp$Last_assessment <- speciesRL$year_published[match(speciesDDapp$taxonid, speciesRL$taxonid)]
-speciesDDapp <- subset(speciesDDapp, taxonid %in% speciesRL$taxonid[speciesRL$category=="DD"])
 
 # Load Map countries
 coo_raw<-read_sf("Species/Map countries/Red_List_countries_msSimplif_coo_0.001.shp") ; names(coo_raw)<-c("SIS_name0", "SIS_name1", "lookup", "lookup_SIS0", "geometry") ; coo_raw$lookup_SIS0[coo_raw$SIS_name0=="Namibia"]<-"NA" # Used to map COO; Namibia should be "NA" and not NA
@@ -155,8 +160,7 @@ pr$registerHooks(
   )
 )
 
-#bytes = 40MB
-options_plumber(maxRequestSize = 100*1000000)
+options_plumber(maxRequestSize = 0)
 pr %>% pr_hook("exit", function() {
   print("Bye bye from sRedList!")
 }) %>% pr_run(port = 8000, host = "0.0.0.0") # nolint
